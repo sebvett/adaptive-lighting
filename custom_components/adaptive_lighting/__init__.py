@@ -7,6 +7,7 @@ from typing import Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
+from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import CONF_SOURCE, Platform
@@ -92,19 +93,23 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
                 await result
 
     try:
-        hass.components.frontend.async_register_built_in_panel(
-            "iframe",
-            "AL Curves",
-            "mdi:chart-bell-curve-cumulative",
-            PANEL_URL.lstrip("/"),
-            {"url": f"{FRONTEND_URL}/index.html?panel=1"},
+        # Use keyword args: newer HA inserted sidebar_default_visible before
+        # frontend_url_path, which broke the previous positional call. Also
+        # hass.components was removed — import frontend directly.
+        frontend.async_register_built_in_panel(
+            hass,
+            component_name="iframe",
+            sidebar_title="AL Curves",
+            sidebar_icon="mdi:chart-bell-curve-cumulative",
+            frontend_url_path=PANEL_URL.lstrip("/"),
+            config={"url": f"{FRONTEND_URL}/index.html?panel=1"},
             require_admin=True,
         )
     except ValueError:
         # Panel already registered (e.g. after reload).
         pass
     except Exception:  # noqa: BLE001
-        _LOGGER.debug("Could not register sidebar panel", exc_info=True)
+        _LOGGER.warning("Could not register sidebar panel", exc_info=True)
 
     _FRONTEND_REGISTERED = True
 
