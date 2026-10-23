@@ -193,7 +193,7 @@ class AdaptiveLightingRoomLight(LightEntity):
         rgb_color (exclusion group 'Color descriptors').
         """
         try:
-            modes = get_supported_color_modes(self.hass, entity_id) or set()
+            modes = set(get_supported_color_modes(self.hass, entity_id) or [])
         except HomeAssistantError:
             modes = set()
 
