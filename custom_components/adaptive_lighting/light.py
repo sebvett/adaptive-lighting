@@ -17,10 +17,13 @@ from homeassistant.components.light import (
     ATTR_TRANSITION,
     ColorMode,
     LightEntity,
+    brightness_supported,
+    get_supported_color_modes,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON
+from homeassistant.const import SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
@@ -32,6 +35,7 @@ from .const import (
     CONF_NAME,
     DOMAIN,
 )
+from .light_util import is_binary_light
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,8 +82,11 @@ class AdaptiveLightingRoomLight(LightEntity):
     @property
     def _curves(self) -> BrightnessCurveSet:
         data = {**self._config_entry.data, **self._config_entry.options}
+        lights = list(data.get(CONF_LIGHTS, []))
+        binary = {eid for eid in lights if is_binary_light(self.hass, eid)}
         return BrightnessCurveSet.from_options(
-            {CONF_BRIGHTNESS_CURVES: data.get(CONF_BRIGHTNESS_CURVES, {})}
+            {CONF_BRIGHTNESS_CURVES: data.get(CONF_BRIGHTNESS_CURVES, {})},
+            binary_lights=binary,
         )
 
     async def async_added_to_hass(self) -> None:
@@ -116,8 +123,7 @@ class AdaptiveLightingRoomLight(LightEntity):
         """Infer room on/brightness from controlled lights (Lightener-style)."""
         lights = self._lights
         if not lights:
-            self._attr_is_on = False
-            self._attr_brightness = None
+            # Keep last commanded room level when no members are configured yet.
             return
 
         curves = self._curves
@@ -125,7 +131,7 @@ class AdaptiveLightingRoomLight(LightEntity):
         level_sets: list[set[int]] = []
         for entity_id in lights:
             state = self.hass.states.get(entity_id)
-            if state is None:
+            if state is None or state.state == STATE_UNAVAILABLE:
                 continue
             if state.state == STATE_ON:
                 any_on = True
@@ -133,6 +139,9 @@ class AdaptiveLightingRoomLight(LightEntity):
             else:
                 brightness = 0
             level_sets.append(set(curves.get(entity_id).translate_back(brightness)))
+
+        if not level_sets:
+            return
 
         self._attr_is_on = any_on
         if not any_on:
@@ -170,6 +179,49 @@ class AdaptiveLightingRoomLight(LightEntity):
             )
         )
 
+    def _color_payload_for_light(
+        self,
+        entity_id: str,
+        *,
+        color_temp_kelvin: int | None,
+        rgb_color: tuple[int, int, int] | None,
+        prefer_rgb: bool,
+    ) -> dict[str, Any]:
+        """Pick at most one HA colour descriptor for this light.
+
+        Home Assistant rejects turn_on calls that set both color_temp and
+        rgb_color (exclusion group 'Color descriptors').
+        """
+        try:
+            modes = set(get_supported_color_modes(self.hass, entity_id) or [])
+        except HomeAssistantError:
+            modes = set()
+
+        payload: dict[str, Any] = {}
+        supports_ct = ColorMode.COLOR_TEMP in modes
+        supports_rgb = bool(
+            modes
+            & {
+                ColorMode.RGB,
+                ColorMode.RGBW,
+                ColorMode.RGBWW,
+                ColorMode.HS,
+                ColorMode.XY,
+            }
+        )
+
+        use_rgb = prefer_rgb and supports_rgb and rgb_color is not None
+        if use_rgb:
+            payload[ATTR_RGB_COLOR] = list(rgb_color)
+        elif supports_ct and color_temp_kelvin is not None:
+            state = self.hass.states.get(entity_id)
+            min_k = (state.attributes.get("min_color_temp_kelvin") if state else None) or 2000
+            max_k = (state.attributes.get("max_color_temp_kelvin") if state else None) or 6500
+            payload[ATTR_COLOR_TEMP_KELVIN] = max(min_k, min(max_k, int(color_temp_kelvin)))
+        elif supports_rgb and rgb_color is not None:
+            payload[ATTR_RGB_COLOR] = list(rgb_color)
+        return payload
+
     async def async_apply_room_brightness(
         self,
         brightness: int | None,
@@ -177,6 +229,7 @@ class AdaptiveLightingRoomLight(LightEntity):
         transition: float | None = None,
         color_temp_kelvin: int | None = None,
         rgb_color: tuple[int, int, int] | None = None,
+        prefer_rgb: bool = False,
         context=None,
         only_lights: list[str] | None = None,
     ) -> None:
@@ -191,38 +244,92 @@ class AdaptiveLightingRoomLight(LightEntity):
             targets = only_lights if only_lights is not None else self._lights
             room = self._attr_brightness or 0
 
+            # Mark member calls as Adaptive Lighting's own so the turn_on
+            # interceptor does not re-adapt them with sun brightness and wipe
+            # the curve-mapped levels we are about to send.
+            call_context = self._member_call_context(context)
+
             for entity_id in targets:
+                state = self.hass.states.get(entity_id)
+                if state is None or state.state == STATE_UNAVAILABLE:
+                    _LOGGER.debug(
+                        "Skipping unavailable member light %s while applying room brightness",
+                        entity_id,
+                    )
+                    continue
+
                 entity_brightness = curves.translate(entity_id, room)
                 data: dict[str, Any] = {"entity_id": entity_id}
                 if transition is not None:
                     data[ATTR_TRANSITION] = transition
 
+                binary = is_binary_light(self.hass, entity_id)
+
                 if entity_brightness <= 0 or not self._attr_is_on:
-                    await self.hass.services.async_call(
-                        "light",
-                        SERVICE_TURN_OFF,
-                        data,
-                        blocking=True,
-                        context=context,
-                    )
+                    try:
+                        await self.hass.services.async_call(
+                            "light",
+                            SERVICE_TURN_OFF,
+                            data,
+                            blocking=True,
+                            context=call_context,
+                        )
+                    except HomeAssistantError as err:
+                        _LOGGER.warning(
+                            "Failed to turn off %s from room light: %s",
+                            entity_id,
+                            err,
+                        )
                     continue
 
-                data[ATTR_BRIGHTNESS] = entity_brightness
-                if color_temp_kelvin is not None:
-                    data[ATTR_COLOR_TEMP_KELVIN] = color_temp_kelvin
-                if rgb_color is not None:
-                    data[ATTR_RGB_COLOR] = rgb_color
+                if binary:
+                    # On/off lights: never send brightness or colour descriptors.
+                    service = SERVICE_TURN_ON
+                else:
+                    data[ATTR_BRIGHTNESS] = entity_brightness
+                    data.update(
+                        self._color_payload_for_light(
+                            entity_id,
+                            color_temp_kelvin=color_temp_kelvin,
+                            rgb_color=rgb_color,
+                            prefer_rgb=prefer_rgb,
+                        )
+                    )
+                    # Colour-only / brightness-only safety: never send brightness
+                    # to lights that cannot dim (already handled via binary).
+                    try:
+                        modes = get_supported_color_modes(self.hass, entity_id)
+                    except HomeAssistantError:
+                        modes = None
+                    if modes is not None and not brightness_supported(modes):
+                        data.pop(ATTR_BRIGHTNESS, None)
+                    service = SERVICE_TURN_ON
 
-                await self.hass.services.async_call(
-                    "light",
-                    SERVICE_TURN_ON,
-                    data,
-                    blocking=True,
-                    context=context,
-                )
+                try:
+                    await self.hass.services.async_call(
+                        "light",
+                        service,
+                        data,
+                        blocking=True,
+                        context=call_context,
+                    )
+                except HomeAssistantError as err:
+                    _LOGGER.warning(
+                        "Failed to apply room brightness to %s: %s (data=%s)",
+                        entity_id,
+                        err,
+                        data,
+                    )
         finally:
             self._applying = False
             self.async_write_ha_state()
+
+    def _member_call_context(self, parent=None):
+        """Build a context the AL interceptor treats as our own."""
+        switch = self._find_switch()
+        if switch is not None and hasattr(switch, "create_context"):
+            return switch.create_context("room", parent=parent)
+        return parent
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Set room brightness (and forward through curves)."""
@@ -230,22 +337,37 @@ class AdaptiveLightingRoomLight(LightEntity):
         if brightness is None:
             brightness = self._attr_brightness or 255
 
-        # Prefer Adaptive Lighting's current colour when available.
+        # Prefer Adaptive Lighting's current colour when available — but only
+        # one descriptor at a time (HA forbids colour_temp + rgb together).
         color_temp = None
         rgb = None
+        prefer_rgb = False
         transition = kwargs.get(ATTR_TRANSITION)
         switch = self._find_switch()
-        if switch is not None and getattr(switch, "_settings", None):
-            settings = switch._settings  # noqa: SLF001
+        if switch is not None:
+            # Ensure settings exist so colour can be forwarded with brightness.
+            if not getattr(switch, "_settings", None) and hasattr(
+                switch, "_sun_light_settings"
+            ):
+                switch._settings = switch._sun_light_settings.get_settings(  # noqa: SLF001
+                    switch.sleep_mode_switch.is_on,
+                    transition if transition is not None else switch._transition,  # noqa: SLF001
+                )
+            settings = getattr(switch, "_settings", None) or {}
             color_temp = settings.get("color_temp_kelvin")
             rgb = settings.get("rgb_color")
+            prefer_rgb = bool(
+                settings.get("force_rgb_color")
+                or getattr(switch, "_prefer_rgb_color", False)
+            )
 
         await self.async_apply_room_brightness(
             brightness,
             transition=transition,
             color_temp_kelvin=color_temp,
             rgb_color=tuple(rgb) if rgb else None,
-            context=self._context,
+            prefer_rgb=prefer_rgb,
+            context=getattr(self, "_context", None),
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -255,7 +377,7 @@ class AdaptiveLightingRoomLight(LightEntity):
         await self.async_apply_room_brightness(
             0,
             transition=transition,
-            context=self._context,
+            context=getattr(self, "_context", None),
         )
 
     def _find_switch(self):
