@@ -1375,7 +1375,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         if use_transition:
             service_data[ATTR_TRANSITION] = transition
 
-        room_brightness = round(255 * self._settings["brightness_pct"] / 100)
+        room_brightness = self._virtual_room_brightness()
         if "brightness" in features and adapt_brightness:
             # Lightener-style remap: room brightness → this light's curve.
             brightness = self.brightness_curves.translate(light, room_brightness)
@@ -1453,7 +1453,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                 self.sleep_mode_switch.is_on,
                 transition if transition is not None else self._transition,
             )
-            room_brightness = round(255 * self._settings["brightness_pct"] / 100)
+            room_brightness = self._virtual_room_brightness()
             if self.brightness_curves.translate(light, room_brightness) <= 0:
                 turn_off_data: dict[str, Any] = {ATTR_ENTITY_ID: light}
                 if transition:
@@ -1481,13 +1481,41 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         await self.execute_cancellable_adaptation_calls(data)
         self._sync_room_light_brightness()
 
+    def _virtual_room_brightness(self) -> int:
+        """Return the Lightener virtual room level (0–255).
+
+        When the Debug/Room light is on, it is the brightness source of truth
+        and curves are evaluated against it. Otherwise fall back to Adaptive
+        Lighting's sun-derived brightness percentage.
+        """
+        entry_id = getattr(self, "_entry_id", None)
+        if entry_id:
+            room_light = (
+                self.hass.data.get(DOMAIN, {}).get(entry_id, {}).get("room_light")
+            )
+            if (
+                room_light is not None
+                and getattr(room_light, "is_on", False)
+                and getattr(room_light, "brightness", None) is not None
+            ):
+                return max(0, min(255, int(room_light.brightness)))
+        return round(255 * self._settings["brightness_pct"] / 100)
+
     def _sync_room_light_brightness(self) -> None:
-        """Update the virtual room light entity to match current AL settings."""
+        """Push sun brightness into the room light only when it is idle.
+
+        If the room light is already on with a brightness, it owns the virtual
+        level (Lightener model) and must not be overwritten by interval adapt.
+        """
         entry_id = getattr(self, "_entry_id", None)
         if not entry_id or not self._settings.get("brightness_pct"):
             return
         room_light = self.hass.data.get(DOMAIN, {}).get(entry_id, {}).get("room_light")
         if room_light is None:
+            return
+        if getattr(room_light, "is_on", False) and getattr(
+            room_light, "brightness", None
+        ) is not None:
             return
         room_light._attr_brightness = round(  # noqa: SLF001
             255 * self._settings["brightness_pct"] / 100

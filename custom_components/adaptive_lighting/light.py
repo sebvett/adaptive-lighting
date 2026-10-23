@@ -244,6 +244,11 @@ class AdaptiveLightingRoomLight(LightEntity):
             targets = only_lights if only_lights is not None else self._lights
             room = self._attr_brightness or 0
 
+            # Mark member calls as Adaptive Lighting's own so the turn_on
+            # interceptor does not re-adapt them with sun brightness and wipe
+            # the curve-mapped levels we are about to send.
+            call_context = self._member_call_context(context)
+
             for entity_id in targets:
                 state = self.hass.states.get(entity_id)
                 if state is None or state.state == STATE_UNAVAILABLE:
@@ -267,7 +272,7 @@ class AdaptiveLightingRoomLight(LightEntity):
                             SERVICE_TURN_OFF,
                             data,
                             blocking=True,
-                            context=context,
+                            context=call_context,
                         )
                     except HomeAssistantError as err:
                         _LOGGER.warning(
@@ -306,7 +311,7 @@ class AdaptiveLightingRoomLight(LightEntity):
                         service,
                         data,
                         blocking=True,
-                        context=context,
+                        context=call_context,
                     )
                 except HomeAssistantError as err:
                     _LOGGER.warning(
@@ -318,6 +323,13 @@ class AdaptiveLightingRoomLight(LightEntity):
         finally:
             self._applying = False
             self.async_write_ha_state()
+
+    def _member_call_context(self, parent=None):
+        """Build a context the AL interceptor treats as our own."""
+        switch = self._find_switch()
+        if switch is not None and hasattr(switch, "create_context"):
+            return switch.create_context("room", parent=parent)
+        return parent
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Set room brightness (and forward through curves)."""
@@ -332,8 +344,16 @@ class AdaptiveLightingRoomLight(LightEntity):
         prefer_rgb = False
         transition = kwargs.get(ATTR_TRANSITION)
         switch = self._find_switch()
-        if switch is not None and getattr(switch, "_settings", None):
-            settings = switch._settings  # noqa: SLF001
+        if switch is not None:
+            # Ensure settings exist so colour can be forwarded with brightness.
+            if not getattr(switch, "_settings", None) and hasattr(
+                switch, "_sun_light_settings"
+            ):
+                switch._settings = switch._sun_light_settings.get_settings(  # noqa: SLF001
+                    switch.sleep_mode_switch.is_on,
+                    transition if transition is not None else switch._transition,  # noqa: SLF001
+                )
+            settings = getattr(switch, "_settings", None) or {}
             color_temp = settings.get("color_temp_kelvin")
             rgb = settings.get("rgb_color")
             prefer_rgb = bool(
