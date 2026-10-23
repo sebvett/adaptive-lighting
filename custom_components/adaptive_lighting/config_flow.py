@@ -15,6 +15,7 @@ from .const import (  # pylint: disable=unused-import
     DOMAIN,
     EXTRA_VALIDATION,
     NONE_STR,
+    OPTIONS_FORM_SKIP,
     VALIDATION_TUPLES,
 )
 from .switch import validate
@@ -24,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 OPTIONS_FLOW_DESCRIPTION_PLACEHOLDERS = {
     "webapp_url": "https://basnijholt.github.io/adaptive-lighting",
     "docs_url": "https://github.com/basnijholt/adaptive-lighting#readme",
+    "curves_url": "/adaptive-lighting-curves",
 }
 ADVANCED_OPTIONS_SECTION = "advanced"
 
@@ -153,6 +155,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             flat_input = self._flatten_section_input(user_input)
+            # Keep Lightener curves that are managed outside this form.
+            if "brightness_curves" not in flat_input:
+                flat_input["brightness_curves"] = form_data.get(
+                    "brightness_curves",
+                    conf.options.get("brightness_curves", {}),
+                )
             validate_options(flat_input, errors)
             if not errors:
                 return self.async_create_entry(title="", data=flat_input)
@@ -182,6 +190,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         basic_schema: dict[vol.Marker, Any] = {}
         advanced_schema: dict[vol.Marker, Any] = {}
         for name, default, validation in VALIDATION_TUPLES:
+            if name in OPTIONS_FORM_SKIP:
+                continue
             key = vol.Optional(name, default=form_data.get(name, default))
             schema = basic_schema if name in BASIC_OPTIONS else advanced_schema
             schema[key] = to_replace.get(name, validation)

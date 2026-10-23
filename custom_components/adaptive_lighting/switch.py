@@ -87,6 +87,8 @@ from .adaptation_utils import (
     prepare_adaptation_data,
 )
 from .color_and_brightness import SunLightSettings
+from .brightness_curves import BrightnessCurveSet
+from .light_util import is_binary_light
 from .const import (
     ADAPT_BRIGHTNESS_SWITCH,
     ADAPT_COLOR_SWITCH,
@@ -97,6 +99,7 @@ from .const import (
     CONF_ADAPT_ONLY_ON_BARE_TURN_ON,
     CONF_ADAPT_UNTIL_SLEEP,
     CONF_AUTORESET_CONTROL,
+    CONF_BRIGHTNESS_CURVES,
     CONF_BRIGHTNESS_MODE,
     CONF_BRIGHTNESS_MODE_TIME_DARK,
     CONF_BRIGHTNESS_MODE_TIME_LIGHT,
@@ -903,6 +906,8 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         self.sleep_mode_switch = sleep_mode_switch
         self.adapt_color_switch = adapt_color_switch
         self.adapt_brightness_switch = adapt_brightness_switch
+        self._entry_id = config_entry.entry_id
+        self.config_entry = config_entry
 
         data = validate(config_entry)
 
@@ -1012,6 +1017,11 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             self._multi_light_intercept = False
         self._expand_light_groups_flag = data[CONF_EXPAND_LIGHT_GROUPS]
         self._expand_light_groups()  # updates manual control timers
+        self.brightness_curves = BrightnessCurveSet.from_options(
+            {CONF_BRIGHTNESS_CURVES: data.get(CONF_BRIGHTNESS_CURVES, {})}
+        )
+        self.brightness_curves.prune(set(self.lights) | set(self._configured_lights))
+        self._refresh_binary_light_types()
         observer = get_astral_observer(self.hass)
 
         self._sun_light_settings = SunLightSettings(
@@ -1103,6 +1113,12 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             return _expand_light_groups(self.hass, lights)
         return sorted(set(lights))
 
+    def _refresh_binary_light_types(self) -> None:
+        """Mark on/off lights so their curves use a vertical threshold."""
+        lights = set(self.lights) | set(self._configured_lights)
+        binary = {eid for eid in lights if is_binary_light(self.hass, eid)}
+        self.brightness_curves.update_binary_lights(binary)
+
     def _expand_light_groups(self) -> None:
         all_lights = self._resolve_lights()
         removed = set(self.lights) - set(all_lights)
@@ -1118,6 +1134,8 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             all_lights,
             self._auto_reset_manual_control_time,
         )
+        if hasattr(self, "brightness_curves"):
+            self._refresh_binary_light_types()
 
     async def _setup_listeners(self, _: Event[NoEventData] | None = None) -> None:
         _LOGGER.debug("%s: Called '_setup_listeners'", self._name)
@@ -1357,8 +1375,10 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         if use_transition:
             service_data[ATTR_TRANSITION] = transition
 
+        room_brightness = round(255 * self._settings["brightness_pct"] / 100)
         if "brightness" in features and adapt_brightness:
-            brightness = round(255 * self._settings["brightness_pct"] / 100)
+            # Lightener-style remap: room brightness → this light's curve.
+            brightness = self.brightness_curves.translate(light, room_brightness)
             service_data[ATTR_BRIGHTNESS] = brightness
 
         sleep_rgb = (
@@ -1425,6 +1445,27 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             _LOGGER.debug("%s: '%s' is locked", self._name, light)
             return
 
+        # Lightener: if the curve maps room brightness to 0%, turn off instead
+        # of adapting. Detect this before prepare so colour-only turn_ons are
+        # not issued for lights that should stay dark at this room level.
+        if adapt_brightness is not False:
+            self._settings = self._sun_light_settings.get_settings(
+                self.sleep_mode_switch.is_on,
+                transition if transition is not None else self._transition,
+            )
+            room_brightness = round(255 * self._settings["brightness_pct"] / 100)
+            if self.brightness_curves.translate(light, room_brightness) <= 0:
+                turn_off_data: dict[str, Any] = {ATTR_ENTITY_ID: light}
+                if transition:
+                    turn_off_data[ATTR_TRANSITION] = transition
+                await self.hass.services.async_call(
+                    LIGHT_DOMAIN,
+                    SERVICE_TURN_OFF,
+                    turn_off_data,
+                    context=context,
+                )
+                return
+
         data = await self.prepare_adaptation_data(
             light,
             transition,
@@ -1438,6 +1479,21 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             return  # nothing to adapt
 
         await self.execute_cancellable_adaptation_calls(data)
+        self._sync_room_light_brightness()
+
+    def _sync_room_light_brightness(self) -> None:
+        """Update the virtual room light entity to match current AL settings."""
+        entry_id = getattr(self, "_entry_id", None)
+        if not entry_id or not self._settings.get("brightness_pct"):
+            return
+        room_light = self.hass.data.get(DOMAIN, {}).get(entry_id, {}).get("room_light")
+        if room_light is None:
+            return
+        room_light._attr_brightness = round(  # noqa: SLF001
+            255 * self._settings["brightness_pct"] / 100
+        )
+        room_light._attr_is_on = True  # noqa: SLF001
+        room_light.async_write_ha_state()
 
     async def _execute_adaptation_calls(self, data: AdaptationData) -> None:
         """Executes a sequence of adaptation service calls for the given service datas."""
@@ -1458,6 +1514,22 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
             if not service_data:
                 # All service datas processed
+                break
+
+            # Lightener: brightness 0 means turn the light off (skip further
+            # split colour commands so we don't turn it back on).
+            if service_data.get(ATTR_BRIGHTNESS) == 0:
+                turn_off_data = {
+                    key: value
+                    for key, value in service_data.items()
+                    if key in (ATTR_ENTITY_ID, ATTR_TRANSITION)
+                }
+                await self.hass.services.async_call(
+                    LIGHT_DOMAIN,
+                    SERVICE_TURN_OFF,
+                    turn_off_data,
+                    context=data.context,
+                )
                 break
 
             if (

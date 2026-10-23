@@ -71,13 +71,25 @@ CONF_INTERVAL, DEFAULT_INTERVAL = "interval", 90
 DOCS[CONF_INTERVAL] = "Frequency to adapt the lights, in seconds. 🔄"
 
 CONF_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS = "max_brightness", 100
-DOCS[CONF_MAX_BRIGHTNESS] = "Maximum brightness percentage. 💡"
+DOCS[CONF_MAX_BRIGHTNESS] = (
+    "Maximum room brightness percentage used by the sun curve "
+    "(before per-light Lightener curves). 💡"
+)
+
+CONF_BRIGHTNESS_CURVES, DEFAULT_BRIGHTNESS_CURVES = "brightness_curves", {}
+DOCS[CONF_BRIGHTNESS_CURVES] = (
+    "Per-light Lightener-style brightness curves mapping room brightness (1–100) "
+    "to each real light's brightness (0–100). Edited via the curve plot in options. 📈"
+)
 
 CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP = "max_color_temp", 5500
 DOCS[CONF_MAX_COLOR_TEMP] = "Coldest color temperature in Kelvin. ❄️"
 
 CONF_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS = "min_brightness", 1
-DOCS[CONF_MIN_BRIGHTNESS] = "Minimum brightness percentage. 💡"
+DOCS[CONF_MIN_BRIGHTNESS] = (
+    "Minimum room brightness percentage used by the sun curve "
+    "(before per-light Lightener curves). 💡"
+)
 
 CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP = "min_color_temp", 2000
 DOCS[CONF_MIN_COLOR_TEMP] = "Warmest color temperature in Kelvin. 🔥"
@@ -341,11 +353,11 @@ DOCS_APPLY = {
     CONF_LIGHTS: "A light (or list of lights) to apply the settings to. 💡",
 }
 
-# Basic options shown at top level in options flow (not in collapsed section)
+# Basic options shown at top level in options flow (not in collapsed section).
+# min/max brightness moved to advanced — room balance is configured via the
+# Lightener-style brightness curve plot instead.
 BASIC_OPTIONS: set[str] = {
     CONF_LIGHTS,
-    CONF_MIN_BRIGHTNESS,
-    CONF_MAX_BRIGHTNESS,
     CONF_MIN_COLOR_TEMP,
     CONF_MAX_COLOR_TEMP,
     CONF_SLEEP_BRIGHTNESS,
@@ -360,6 +372,40 @@ def int_between(min_int: int, max_int: int) -> vol.All:
     return vol.All(vol.Coerce(int), vol.Range(min=min_int, max=max_int))
 
 
+def _brightness_curves_validator(value: Any) -> dict[str, dict[str, int]]:
+    """Validate Lightener-style brightness curve maps."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise vol.Invalid("brightness_curves must be a mapping of entity_id to points")
+    result: dict[str, dict[str, int]] = {}
+    for entity_id, points in value.items():
+        if not isinstance(entity_id, str) or not entity_id.startswith("light."):
+            raise vol.Invalid(f"Invalid light entity_id: {entity_id}")
+        if not isinstance(points, dict):
+            raise vol.Invalid(f"Curve for {entity_id} must be a mapping")
+        cleaned: dict[str, int] = {}
+        for left, right in points.items():
+            try:
+                virtual = int(left)
+                real = int(right)
+            except (TypeError, ValueError) as err:
+                raise vol.Invalid(
+                    f"Invalid curve point {left}:{right} for {entity_id}"
+                ) from err
+            if not 1 <= virtual <= 100 or not 0 <= real <= 100:
+                raise vol.Invalid(
+                    f"Curve point out of range for {entity_id}: {virtual}:{real}"
+                )
+            cleaned[str(virtual)] = real
+        result[entity_id] = cleaned
+    return result
+
+
+# Options rendered in the HA options form. Brightness curves are edited via the
+# interactive plot (websocket), not as raw schema fields.
+OPTIONS_FORM_SKIP: set[str] = {CONF_BRIGHTNESS_CURVES}
+
 VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     (CONF_LIGHTS, DEFAULT_LIGHTS, cv.entity_ids),  # type: ignore[arg-type]
     (CONF_INTERVAL, DEFAULT_INTERVAL, cv.positive_int),
@@ -367,6 +413,7 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     (CONF_INITIAL_TRANSITION, DEFAULT_INITIAL_TRANSITION, VALID_TRANSITION),
     (CONF_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS, int_between(1, 100)),
     (CONF_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS, int_between(1, 100)),
+    (CONF_BRIGHTNESS_CURVES, DEFAULT_BRIGHTNESS_CURVES, _brightness_curves_validator),
     (CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP, int_between(1000, 10000)),
     (CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, int_between(1000, 10000)),
     (CONF_PREFER_RGB_COLOR, DEFAULT_PREFER_RGB_COLOR, bool),

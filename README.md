@@ -6,6 +6,8 @@
 
 # 🌞 Adaptive Lighting: Enhance Your Home's Atmosphere with Smart, Sun-Synchronized Lighting 🌙
 
+> **Fork note:** Extends upstream Adaptive Lighting with [Lightener](https://github.com/fredck/lightener)-style per-light brightness curves, a virtual room light, binary-light thresholds, and a curve editor. See `LIGHTENER.md` and `INSTALL.md`.
+
 <img src="https://raw.githubusercontent.com/home-assistant/brands/master/custom_integrations/adaptive_lighting/icon@2x.png" alt="logo" width="256px" height="256px" />
 
 [Adaptive Lighting](https://github.com/basnijholt/adaptive-lighting) is a custom component for [Home Assistant](https://www.home-assistant.io/) that intelligently adjusts the brightness and color of your lights 💡 based on the sun's position, while still allowing for manual control.

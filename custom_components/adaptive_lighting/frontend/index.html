@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Adaptive Lighting — Brightness curves</title>
+    <link rel="stylesheet" href="./curve-editor.css" />
+  </head>
+  <body>
+    <div id="al-curve-editor"></div>
+    <script>
+      // Prefer the parent Home Assistant connection when embedded as a panel.
+      (function bridgeHass() {
+        try {
+          const ha =
+            window.parent &&
+            window.parent.document &&
+            window.parent.document.querySelector("home-assistant");
+          if (ha && ha.hass && ha.hass.connection) {
+            window.hassConnection = { conn: ha.hass.connection };
+          }
+        } catch (_) {
+          /* cross-origin / standalone */
+        }
+        if (!window.hassConnection) {
+          document.getElementById("al-curve-editor").dataset.mode = "demo";
+        }
+      })();
+    </script>
+    <script src="./curve-editor.js"></script>
+  </body>
+</html>
