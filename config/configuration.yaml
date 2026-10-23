@@ -17,3 +17,10 @@ light:
         set_level:
         set_temperature:
         supports_transition_template: "{{ true }}"
+      dummylight_2:
+        friendly_name: "Dummy Light 2"
+        turn_on:
+        turn_off:
+        set_level:
+        set_temperature:
+        supports_transition_template: "{{ true }}"
