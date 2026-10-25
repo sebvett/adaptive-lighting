@@ -1,16 +1,22 @@
+/* Theme tokens — prefer live Home Assistant CSS variables (bridged from parent). */
 :root {
-  --al-bg: #f6f8fa;
-  --al-surface: #ffffff;
-  --al-ink: #1c1c1c;
-  --al-muted: #5c6370;
-  --al-border: #d8dee6;
-  --al-accent: #047857;
-  --al-accent-soft: #d1fae5;
-  --al-danger: #b91c1c;
-  --al-grid: #e8edf2;
-  --al-font: "Segoe UI", system-ui, -apple-system, sans-serif;
-  --al-mono: "IBM Plex Mono", ui-monospace, monospace;
-  color-scheme: light;
+  --al-bg: var(--primary-background-color, #fafafa);
+  --al-surface: var(--card-background-color, #fff);
+  --al-surface-2: var(--secondary-background-color, #f5f5f5);
+  --al-ink: var(--primary-text-color, #212121);
+  --al-muted: var(--secondary-text-color, #727272);
+  --al-border: var(--divider-color, #e0e0e0);
+  --al-accent: var(--primary-color, var(--mdc-theme-primary, #03a9f4));
+  --al-accent-contrast: var(--text-primary-color, #fff);
+  --al-danger: var(--error-color, #db4437);
+  --al-grid: var(--divider-color, #e0e0e0);
+  --al-font: var(--ha-font-family-body, Roboto, Noto, sans-serif);
+  --al-mono: var(--ha-font-family-code, ui-monospace, monospace);
+  --al-radius: var(--ha-card-border-radius, 8px);
+  --al-shadow: var(--ha-card-box-shadow, none);
+  --al-room-fill: color-mix(in srgb, var(--al-accent) 28%, transparent);
+  --al-room-stroke: var(--al-accent);
+  color-scheme: light dark;
 }
 
 * {
@@ -21,18 +27,16 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background:
-    radial-gradient(1200px 600px at 10% -10%, #ecfdf5 0%, transparent 55%),
-    radial-gradient(900px 500px at 100% 0%, #eff6ff 0%, transparent 50%),
-    var(--al-bg);
+  background: var(--al-bg);
   color: var(--al-ink);
   font-family: var(--al-font);
+  -webkit-font-smoothing: antialiased;
 }
 
 .al-shell {
   max-width: 960px;
   margin: 0 auto;
-  padding: 1.25rem 1rem 2.5rem;
+  padding: 1rem 1rem 2.5rem;
 }
 
 .al-header {
@@ -46,22 +50,25 @@ body {
 
 .al-header h1 {
   margin: 0;
-  font-size: 1.35rem;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  font-family: var(--ha-font-family-heading, var(--al-font));
 }
 
 .al-header p {
   margin: 0.2rem 0 0;
   color: var(--al-muted);
-  font-size: 0.92rem;
+  font-size: 0.875rem;
   max-width: 36rem;
+  line-height: 1.4;
 }
 
 .al-actions {
   display: flex;
   gap: 0.5rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .al-btn {
@@ -69,30 +76,32 @@ body {
   border: 1px solid var(--al-border);
   background: var(--al-surface);
   color: var(--al-ink);
-  border-radius: 8px;
+  border-radius: var(--al-radius);
   padding: 0.45rem 0.85rem;
   font: inherit;
-  font-size: 0.9rem;
+  font-size: 0.875rem;
+  font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 
 .al-btn:hover {
-  border-color: #9aa7b5;
-}
-
-.al-btn:active {
-  transform: translateY(1px);
+  background: var(--al-surface-2);
 }
 
 .al-btn.primary {
   background: var(--al-accent);
   border-color: var(--al-accent);
-  color: #fff;
+  color: var(--al-accent-contrast);
 }
 
 .al-btn.primary:hover {
-  background: #066648;
+  filter: brightness(0.95);
+}
+
+.al-btn.danger {
+  color: var(--al-danger);
+  border-color: color-mix(in srgb, var(--al-danger) 40%, var(--al-border));
 }
 
 .al-btn:disabled {
@@ -100,10 +109,12 @@ body {
   cursor: not-allowed;
 }
 
-.al-select {
+.al-select,
+.al-input {
   border: 1px solid var(--al-border);
-  border-radius: 8px;
+  border-radius: var(--al-radius);
   background: var(--al-surface);
+  color: var(--al-ink);
   padding: 0.4rem 0.65rem;
   font: inherit;
   min-width: 12rem;
@@ -112,18 +123,44 @@ body {
 .al-plot-card {
   background: var(--al-surface);
   border: 1px solid var(--al-border);
-  border-radius: 14px;
-  padding: 0.75rem 0.75rem 0.35rem;
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+  border-radius: var(--al-radius);
+  padding: 0.75rem 0.75rem 0.5rem;
+  box-shadow: var(--al-shadow);
 }
 
 .al-plot-meta {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 1rem;
+  flex-wrap: wrap;
   padding: 0.15rem 0.35rem 0.55rem;
   color: var(--al-muted);
   font-size: 0.8rem;
+}
+
+.al-room-control {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.al-room-control label {
+  font-weight: 500;
+  color: var(--al-ink);
+}
+
+.al-room-control input[type="range"] {
+  width: min(220px, 40vw);
+  accent-color: var(--al-accent);
+}
+
+.al-room-pct {
+  font-variant-numeric: tabular-nums;
+  min-width: 2.75rem;
+  color: var(--al-ink);
+  font-weight: 500;
 }
 
 #al-plot {
@@ -132,9 +169,8 @@ body {
   display: block;
   touch-action: none;
   cursor: crosshair;
-  border-radius: 10px;
-  background:
-    linear-gradient(180deg, #fbfdff 0%, #f4f7fa 100%);
+  border-radius: calc(var(--al-radius) * 0.75);
+  background: var(--al-surface-2);
 }
 
 .al-axis-label {
@@ -146,6 +182,17 @@ body {
 .al-grid-line {
   stroke: var(--al-grid);
   stroke-width: 1;
+  opacity: 0.7;
+}
+
+.al-room-bar {
+  fill: var(--al-room-fill);
+  stroke: none;
+}
+
+.al-room-bar-edge {
+  stroke: var(--al-room-stroke);
+  stroke-width: 2;
 }
 
 .al-curve {
@@ -183,15 +230,15 @@ body {
   margin-left: 0.35rem;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  background: #eef2f6;
+  background: var(--al-surface-2);
   color: var(--al-muted);
   font-size: 0.7rem;
-  font-weight: 600;
+  font-weight: 500;
   vertical-align: middle;
 }
 
 .al-point {
-  stroke: #fff;
+  stroke: var(--al-surface);
   stroke-width: 2;
   cursor: grab;
   transition: r 0.12s ease;
@@ -206,23 +253,69 @@ body {
   cursor: grabbing;
 }
 
+.al-point-hit {
+  fill: transparent;
+  stroke: none;
+  cursor: pointer;
+}
+
+.al-point-delete {
+  fill: var(--al-danger);
+  stroke: var(--al-surface);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+
+.al-point-delete-x {
+  fill: none;
+  stroke: var(--al-accent-contrast, #fff);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.al-hint {
+  margin: 0.35rem 0.35rem 0;
+  color: var(--al-muted);
+  font-size: 0.75rem;
+}
+
 .al-lights {
   margin-top: 1rem;
   background: var(--al-surface);
   border: 1px solid var(--al-border);
-  border-radius: 14px;
+  border-radius: var(--al-radius);
   overflow: hidden;
+  box-shadow: var(--al-shadow);
 }
 
 .al-lights-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   padding: 0.7rem 1rem;
   font-size: 0.78rem;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--al-muted);
   border-bottom: 1px solid var(--al-border);
-  background: #fafbfc;
+  background: var(--al-surface-2);
+}
+
+.al-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--al-border);
+  background: var(--al-surface);
+}
+
+.al-add-row .al-select {
+  flex: 1;
+  min-width: 0;
 }
 
 .al-light-row {
@@ -241,11 +334,11 @@ body {
 }
 
 .al-light-row:hover {
-  background: #f8fafc;
+  background: var(--al-surface-2);
 }
 
 .al-light-row.selected {
-  background: var(--al-accent-soft);
+  background: color-mix(in srgb, var(--al-accent) 14%, var(--al-surface));
 }
 
 .al-swatch {
@@ -271,6 +364,14 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--al-muted);
   font-size: 0.85rem;
+  text-align: right;
+  line-height: 1.35;
+}
+
+.al-light-value strong {
+  display: block;
+  color: var(--al-ink);
+  font-weight: 500;
 }
 
 .al-status {
@@ -305,11 +406,14 @@ body {
 
   .al-actions {
     width: 100%;
-    flex-wrap: wrap;
   }
 
   .al-select {
     flex: 1;
     min-width: 0;
+  }
+
+  .al-add-row {
+    flex-wrap: wrap;
   }
 }
