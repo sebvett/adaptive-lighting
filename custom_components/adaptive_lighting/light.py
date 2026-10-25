@@ -12,14 +12,20 @@ from typing import Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_BRIGHTNESS_PCT,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_HS_COLOR,
     ATTR_RGB_COLOR,
     ATTR_TRANSITION,
+    ATTR_XY_COLOR,
     ColorMode,
     LightEntity,
     brightness_supported,
     get_supported_color_modes,
 )
+
+# Legacy mireds colour attr — string form avoids importing deprecated ATTR_COLOR_TEMP.
+_ATTR_COLOR_TEMP_MIREDS = "color_temp"
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import SERVICE_TURN_OFF, SERVICE_TURN_ON, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, callback
@@ -331,31 +337,88 @@ class AdaptiveLightingRoomLight(LightEntity):
             return switch.create_context("room", parent=parent)
         return parent
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Set room brightness (and forward through curves)."""
-        brightness = kwargs.get(ATTR_BRIGHTNESS)
-        if brightness is None:
-            brightness = self._attr_brightness or 255
+    def _brightness_from_kwargs(self, kwargs: dict[str, Any]) -> int | None:
+        """Return caller-supplied brightness, or None for a bare turn_on."""
+        if ATTR_BRIGHTNESS in kwargs and kwargs[ATTR_BRIGHTNESS] is not None:
+            return max(0, min(255, int(kwargs[ATTR_BRIGHTNESS])))
+        if ATTR_BRIGHTNESS_PCT in kwargs and kwargs[ATTR_BRIGHTNESS_PCT] is not None:
+            return max(0, min(255, round(255 * float(kwargs[ATTR_BRIGHTNESS_PCT]) / 100)))
+        return None
 
-        # Prefer Adaptive Lighting's current colour when available — but only
-        # one descriptor at a time (HA forbids colour_temp + rgb together).
-        color_temp = None
-        rgb = None
-        prefer_rgb = False
+    def _color_from_kwargs(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[int | None, tuple[int, int, int] | None, bool]:
+        """Return (kelvin, rgb, prefer_rgb) when the caller supplied colour."""
+        if ATTR_RGB_COLOR in kwargs and kwargs[ATTR_RGB_COLOR] is not None:
+            rgb = kwargs[ATTR_RGB_COLOR]
+            return None, (int(rgb[0]), int(rgb[1]), int(rgb[2])), True
+        if ATTR_COLOR_TEMP_KELVIN in kwargs and kwargs[ATTR_COLOR_TEMP_KELVIN] is not None:
+            return int(kwargs[ATTR_COLOR_TEMP_KELVIN]), None, False
+        if (
+            _ATTR_COLOR_TEMP_MIREDS in kwargs
+            and kwargs[_ATTR_COLOR_TEMP_MIREDS] is not None
+        ):
+            mireds = max(1, int(kwargs[_ATTR_COLOR_TEMP_MIREDS]))
+            return max(1000, min(10000, round(1_000_000 / mireds))), None, False
+        # HS / XY are colour equivalents — treat as "caller supplied colour" so
+        # we do not overwrite with Adaptive Lighting's colour temp.
+        if kwargs.get(ATTR_HS_COLOR) is not None or kwargs.get(ATTR_XY_COLOR) is not None:
+            return None, None, False
+        return None, None, False
+
+    def _al_settings(self, switch, transition: float | None) -> dict[str, Any]:
+        """Ensure Adaptive Lighting settings exist and return them."""
+        if switch is None:
+            return {}
+        if not getattr(switch, "_settings", None) and hasattr(
+            switch, "_sun_light_settings"
+        ):
+            switch._settings = switch._sun_light_settings.get_settings(  # noqa: SLF001
+                switch.sleep_mode_switch.is_on,
+                transition
+                if transition is not None
+                else getattr(switch, "_transition", None),
+            )
+        return getattr(switch, "_settings", None) or {}
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Set room brightness (and forward through curves).
+
+        Bare ``turn_on`` (no brightness / colour in the call) uses Adaptive
+        Lighting's current brightness and colour temperature — same as turning
+        an individual member light on. Explicit brightness or colour in the
+        service call wins.
+        """
         transition = kwargs.get(ATTR_TRANSITION)
         switch = self._find_switch()
-        if switch is not None:
-            # Ensure settings exist so colour can be forwarded with brightness.
-            if not getattr(switch, "_settings", None) and hasattr(
-                switch, "_sun_light_settings"
-            ):
-                switch._settings = switch._sun_light_settings.get_settings(  # noqa: SLF001
-                    switch.sleep_mode_switch.is_on,
-                    transition if transition is not None else switch._transition,  # noqa: SLF001
-                )
-            settings = getattr(switch, "_settings", None) or {}
+        settings = self._al_settings(switch, transition)
+
+        brightness = self._brightness_from_kwargs(kwargs)
+        if brightness is None:
+            bri_pct = settings.get("brightness_pct")
+            if bri_pct is not None:
+                brightness = max(0, min(255, round(255 * float(bri_pct) / 100)))
+            else:
+                brightness = self._attr_brightness or 255
+
+        # Prefer caller-supplied colour; otherwise Adaptive Lighting's current
+        # colour — but only one descriptor at a time (HA forbids colour_temp +
+        # rgb together).
+        color_temp, rgb, prefer_rgb = self._color_from_kwargs(kwargs)
+        caller_supplied_color = any(
+            key in kwargs and kwargs[key] is not None
+            for key in (
+                ATTR_COLOR_TEMP_KELVIN,
+                _ATTR_COLOR_TEMP_MIREDS,
+                ATTR_RGB_COLOR,
+                ATTR_HS_COLOR,
+                ATTR_XY_COLOR,
+            )
+        )
+        if not caller_supplied_color and settings:
             color_temp = settings.get("color_temp_kelvin")
-            rgb = settings.get("rgb_color")
+            rgb_setting = settings.get("rgb_color")
+            rgb = tuple(rgb_setting) if rgb_setting else None
             prefer_rgb = bool(
                 settings.get("force_rgb_color")
                 or getattr(switch, "_prefer_rgb_color", False)

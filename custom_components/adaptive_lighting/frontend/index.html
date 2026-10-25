@@ -4,20 +4,106 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Adaptive Lighting — Brightness curves</title>
+    <!-- Re-use Home Assistant's Roboto faces from the HA static asset tree -->
+    <style>
+      @font-face {
+        font-family: "Roboto";
+        font-style: normal;
+        font-weight: 300;
+        font-display: swap;
+        src: local("Roboto Light"),
+          url("/static/fonts/roboto/Roboto-Light.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Roboto";
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: local("Roboto"), local("Roboto Regular"),
+          url("/static/fonts/roboto/Roboto-Regular.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Roboto";
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: local("Roboto Medium"),
+          url("/static/fonts/roboto/Roboto-Medium.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "Roboto";
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: local("Roboto Bold"),
+          url("/static/fonts/roboto/Roboto-Bold.woff2") format("woff2");
+      }
+    </style>
     <link rel="stylesheet" href="./curve-editor.css" />
   </head>
   <body>
     <div id="al-curve-editor"></div>
     <script>
       // Prefer the parent Home Assistant connection when embedded as a panel.
+      // Also copy HA theme CSS variables so this iframe matches the active theme.
       (function bridgeHass() {
+        const THEME_VARS = [
+          "--primary-color",
+          "--accent-color",
+          "--error-color",
+          "--primary-text-color",
+          "--secondary-text-color",
+          "--disabled-text-color",
+          "--primary-background-color",
+          "--secondary-background-color",
+          "--card-background-color",
+          "--divider-color",
+          "--mdc-theme-primary",
+          "--mdc-theme-secondary",
+          "--app-header-background-color",
+          "--app-header-text-color",
+          "--ha-card-border-radius",
+          "--ha-card-border-color",
+          "--ha-card-box-shadow",
+          "--state-icon-color",
+          "--rgb-primary-color",
+          "--rgb-primary-text-color",
+          "--ha-font-family-body",
+          "--ha-font-family-heading",
+          "--ha-font-family-code",
+        ];
+        function syncTheme(haEl) {
+          try {
+            const styles = getComputedStyle(haEl);
+            for (const name of THEME_VARS) {
+              const value = styles.getPropertyValue(name).trim();
+              if (value) {
+                document.documentElement.style.setProperty(name, value);
+              }
+            }
+            const scheme = styles.getPropertyValue("color-scheme").trim();
+            if (scheme) {
+              document.documentElement.style.colorScheme = scheme;
+            }
+            document.documentElement.classList.add("ha-themed");
+          } catch (_) {
+            /* ignore */
+          }
+        }
         try {
           const ha =
             window.parent &&
             window.parent.document &&
             window.parent.document.querySelector("home-assistant");
           if (ha && ha.hass && ha.hass.connection) {
-            window.hassConnection = { conn: ha.hass.connection };
+            window.hassConnection = { conn: ha.hass.connection, hass: ha.hass };
+            syncTheme(ha);
+            // Re-sync when HA themes change (dark/light toggle, theme picker).
+            if (typeof MutationObserver !== "undefined") {
+              const obs = new MutationObserver(() => syncTheme(ha));
+              obs.observe(ha, { attributes: true, attributeFilter: ["style", "class"] });
+            }
+            setInterval(() => syncTheme(ha), 5000);
           }
         } catch (_) {
           /* cross-origin / standalone */
