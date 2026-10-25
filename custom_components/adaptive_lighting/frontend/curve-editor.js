@@ -544,15 +544,40 @@
       }, LIVE_THROTTLE_MS);
     }
 
+    /** Serialize in-editor curves for playhead preview (may be unsaved). */
+    editorCurvesPayload() {
+      this.syncSelectedGroupCurves();
+      const curves = {};
+      for (const id of this.state.lights) {
+        const curve = this.state.curves[id];
+        if (!curve) continue;
+        if (curve.binary) {
+          curves[id] = {
+            binary: true,
+            threshold: curve.threshold,
+            points: [{ virtual: curve.threshold, real: 100 }],
+          };
+        } else {
+          curves[id] = {
+            binary: false,
+            points: curve.points.filter((p) => p.virtual > 0),
+          };
+        }
+      }
+      return curves;
+    }
+
     async applyRoomBrightness(pct, { silent = false } = {}) {
       if (this.demo) {
         if (!silent) this.setStatus(`Demo room set to ${pct}%.`, "ok");
         return;
       }
       try {
+        // Always send current editor curves so scrub evaluates unsaved edits.
         await this.ws("adaptive_lighting/set_room_brightness", {
           entry_id: this.state.entryId,
           brightness_pct: Math.round(pct),
+          curves: this.editorCurvesPayload(),
         });
         if (!silent) this.setStatus(`Room brightness set to ${pct}%.`, "ok");
         setTimeout(() => this.refreshLiveState(), 500);

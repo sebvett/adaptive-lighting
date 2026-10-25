@@ -79,6 +79,8 @@ class AdaptiveLightingRoomLight(LightEntity):
         self._attr_brightness = None
         self._unsub = None
         self._applying = False
+        # Optional in-memory curves for AL Curves playhead preview (not saved).
+        self._preview_curves: BrightnessCurveSet | None = None
 
     @property
     def _lights(self) -> list[str]:
@@ -87,6 +89,8 @@ class AdaptiveLightingRoomLight(LightEntity):
 
     @property
     def _curves(self) -> BrightnessCurveSet:
+        if self._preview_curves is not None:
+            return self._preview_curves
         data = {**self._config_entry.data, **self._config_entry.options}
         lights = list(data.get(CONF_LIGHTS, []))
         binary = {eid for eid in lights if is_binary_light(self.hass, eid)}
@@ -246,7 +250,7 @@ class AdaptiveLightingRoomLight(LightEntity):
                 self._attr_brightness = max(0, min(255, int(brightness)))
                 self._attr_is_on = self._attr_brightness > 0
 
-            curves = self._curves
+            curves = self._curves  # honors _preview_curves when set by Curves editor
             targets = only_lights if only_lights is not None else self._lights
             room = self._attr_brightness or 0
 

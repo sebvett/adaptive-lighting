@@ -237,6 +237,27 @@ def _normalize_curve_groups(
     return cleaned
 
 
+def _curve_set_from_ui(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    raw_curves: dict[str, Any],
+) -> BrightnessCurveSet:
+    """Build a BrightnessCurveSet from Curves-editor payload without persisting."""
+    lights = set(_lights_for_entry(entry))
+    binary_lights = {eid for eid in lights if is_binary_light(hass, eid)}
+    cleaned: dict[str, dict[str, int]] = {}
+    for entity_id, payload in raw_curves.items():
+        if entity_id not in lights or not isinstance(payload, dict):
+            continue
+        result = _clean_curve_payload(entity_id, payload, binary_lights)
+        if result is not None:
+            cleaned[entity_id] = result
+    return BrightnessCurveSet.from_options(
+        {CONF_BRIGHTNESS_CURVES: cleaned},
+        binary_lights=binary_lights,
+    )
+
+
 def _clean_curve_payload(
     entity_id: str,
     payload: dict[str, Any],
@@ -441,6 +462,7 @@ def ws_save_curves(
         vol.Required("type"): "adaptive_lighting/set_room_brightness",
         vol.Required("entry_id"): str,
         vol.Required("brightness_pct"): vol.All(int, vol.Range(min=0, max=100)),
+        vol.Optional("curves"): dict,
     }
 )
 @callback
@@ -449,7 +471,12 @@ def ws_set_room_brightness(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Set the virtual room light brightness (for curve testing)."""
+    """Set the virtual room light brightness (for curve testing).
+
+    Optional ``curves`` (Curves-editor payload) is applied for this call only —
+    it is not written to config entry options. That lets the playhead preview
+    unsaved edits.
+    """
     entry = _entry(hass, msg["entry_id"])
     if entry is None:
         connection.send_error(msg["id"], "not_found", "Config entry not found")
@@ -459,13 +486,23 @@ def ws_set_room_brightness(
     brightness = max(0, min(255, round(255 * brightness_pct / 100)))
     room_light = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("room_light")
     room_id = _room_entity_id(entry)
+    preview_curves = None
+    if isinstance(msg.get("curves"), dict) and msg["curves"]:
+        preview_curves = _curve_set_from_ui(hass, entry, msg["curves"])
 
     async def _apply() -> None:
         if room_light is not None:
-            if brightness <= 0:
-                await room_light.async_turn_off()
-            else:
-                await room_light.async_turn_on(**{ATTR_BRIGHTNESS: brightness})
+            previous = room_light._preview_curves  # noqa: SLF001
+            room_light._preview_curves = preview_curves  # noqa: SLF001
+            try:
+                if brightness <= 0:
+                    await room_light.async_turn_off()
+                else:
+                    await room_light.async_turn_on(**{ATTR_BRIGHTNESS: brightness})
+            finally:
+                # Avoid clobbering a newer overlapping scrub's overlay.
+                if room_light._preview_curves is preview_curves:  # noqa: SLF001
+                    room_light._preview_curves = previous  # noqa: SLF001
             return
         service = "turn_off" if brightness <= 0 else "turn_on"
         data: dict[str, Any] = {"entity_id": room_id}
@@ -481,6 +518,7 @@ def ws_set_room_brightness(
             "entity_id": room_id,
             "brightness": brightness,
             "brightness_pct": brightness_pct,
+            "preview_curves": preview_curves is not None,
         },
     )
 
