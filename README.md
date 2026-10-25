@@ -6,7 +6,16 @@
 
 # 🌞 Adaptive Lighting: Enhance Your Home's Atmosphere with Smart, Sun-Synchronized Lighting 🌙
 
-> **Fork note:** Extends upstream Adaptive Lighting with [Lightener](https://github.com/fredck/lightener)-style per-light brightness curves, a virtual room light, binary-light thresholds, and a curve editor. See `LIGHTENER.md` and `INSTALL.md`.
+> **Heads-up — this is an experiment**
+>
+> This repository ([sebvett/adaptive-lighting](https://github.com/sebvett/adaptive-lighting)) is a **derivative** of two excellent projects, mashed together because I wanted Adaptive Lighting’s sun-synced behaviour and Lightener-style brightness curves in one place:
+>
+> - **[Adaptive Lighting](https://github.com/basnijholt/adaptive-lighting)** by [Bas Nijholt](https://github.com/basnijholt) — circadian brightness & colour for Home Assistant  
+> - **[Lightener](https://github.com/fredck/lightener)** by [Frederico Knabben](https://github.com/fredck) — virtual room lights with independent brightness response curves
+>
+> I’m trying this out. In combining the projects, there's a lot of AI-powered bodging on top of their original work - if you don't want multi-light mapping **and** circadian brightness/colour, I'd suggest downloading an original. Credit and gratitude to both authors; any mess here is mine (and the bots’).
+>
+> Upstream Adaptive Lighting docs and features below mostly still apply; Lightener-style curve / room behaviour has been built on top. See `LIGHTENER.md` and `INSTALL.md`.
 
 <img src="https://raw.githubusercontent.com/home-assistant/brands/master/custom_integrations/adaptive_lighting/icon@2x.png" alt="logo" width="256px" height="256px" />
 
