@@ -82,6 +82,14 @@ DOCS[CONF_BRIGHTNESS_CURVES] = (
     "to each real light's brightness (0–100). Edited via the curve plot in options. 📈"
 )
 
+# Curves-UI-only groups (not Home Assistant light groups). Members share one
+# curve series on the plot; brightness_curves stays keyed per entity_id.
+CONF_CURVE_GROUPS, DEFAULT_CURVE_GROUPS = "curve_groups", {}
+DOCS[CONF_CURVE_GROUPS] = (
+    "Optional Curves-editor groups: lights that share one brightness curve and "
+    "one plot series. Distinct from Home Assistant light groups. 🧩"
+)
+
 CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP = "max_color_temp", 5500
 DOCS[CONF_MAX_COLOR_TEMP] = "Coldest color temperature in Kelvin. ❄️"
 
@@ -402,9 +410,9 @@ def _brightness_curves_validator(value: Any) -> dict[str, dict[str, int]]:
     return result
 
 
-# Options rendered in the HA options form. Brightness curves are edited via the
-# interactive plot (websocket), not as raw schema fields.
-OPTIONS_FORM_SKIP: set[str] = {CONF_BRIGHTNESS_CURVES}
+# Options rendered in the HA options form. Brightness curves / curve groups are
+# edited via the interactive plot (websocket), not as raw schema fields.
+OPTIONS_FORM_SKIP: set[str] = {CONF_BRIGHTNESS_CURVES, CONF_CURVE_GROUPS}
 
 VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     (CONF_LIGHTS, DEFAULT_LIGHTS, cv.entity_ids),  # type: ignore[arg-type]

@@ -14,7 +14,7 @@
   --al-mono: var(--ha-font-family-code, ui-monospace, monospace);
   --al-radius: var(--ha-card-border-radius, 8px);
   --al-shadow: var(--ha-card-box-shadow, none);
-  --al-room-fill: color-mix(in srgb, var(--al-accent) 28%, transparent);
+  --al-room-fill: color-mix(in srgb, var(--al-accent) 32%, transparent);
   --al-room-stroke: var(--al-accent);
   color-scheme: light dark;
 }
@@ -52,7 +52,6 @@ body {
   margin: 0;
   font-size: 1.25rem;
   font-weight: 500;
-  letter-spacing: 0;
   font-family: var(--ha-font-family-heading, var(--al-font));
 }
 
@@ -60,7 +59,7 @@ body {
   margin: 0.2rem 0 0;
   color: var(--al-muted);
   font-size: 0.875rem;
-  max-width: 36rem;
+  max-width: 40rem;
   line-height: 1.4;
 }
 
@@ -99,11 +98,6 @@ body {
   filter: brightness(0.95);
 }
 
-.al-btn.danger {
-  color: var(--al-danger);
-  border-color: color-mix(in srgb, var(--al-danger) 40%, var(--al-border));
-}
-
 .al-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -117,48 +111,29 @@ body {
   color: var(--al-ink);
   padding: 0.4rem 0.65rem;
   font: inherit;
-  min-width: 12rem;
+  min-width: 10rem;
 }
 
 .al-plot-card {
   background: var(--al-surface);
   border: 1px solid var(--al-border);
   border-radius: var(--al-radius);
-  padding: 0.75rem 0.75rem 0.5rem;
+  padding: 0.75rem 0.75rem 0.65rem;
   box-shadow: var(--al-shadow);
 }
 
 .al-plot-meta {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: baseline;
   gap: 1rem;
   flex-wrap: wrap;
-  padding: 0.15rem 0.35rem 0.55rem;
+  padding: 0.15rem 0.35rem 0.45rem;
   color: var(--al-muted);
   font-size: 0.8rem;
 }
 
-.al-room-control {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  flex-wrap: wrap;
-}
-
-.al-room-control label {
-  font-weight: 500;
-  color: var(--al-ink);
-}
-
-.al-room-control input[type="range"] {
-  width: min(220px, 40vw);
-  accent-color: var(--al-accent);
-}
-
-.al-room-pct {
-  font-variant-numeric: tabular-nums;
-  min-width: 2.75rem;
+.al-plot-meta strong {
   color: var(--al-ink);
   font-weight: 500;
 }
@@ -169,8 +144,56 @@ body {
   display: block;
   touch-action: none;
   cursor: crosshair;
-  border-radius: calc(var(--al-radius) * 0.75);
+  border-radius: calc(var(--al-radius) * 0.75) calc(var(--al-radius) * 0.75) 0 0;
   background: var(--al-surface-2);
+}
+
+.al-scrub-strip {
+  position: relative;
+  height: 28px;
+  margin: 0 0 0.15rem;
+  /* Match SVG plot padding so 0–100% aligns with the X axis */
+  margin-left: calc(44 / 720 * 100%);
+  margin-right: calc(16 / 720 * 100%);
+  border-radius: 0 0 6px 6px;
+  background: var(--al-surface-2);
+  border: 1px solid var(--al-border);
+  border-top: none;
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.al-scrub-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--al-room-fill);
+  border-radius: 0 0 0 5px;
+  pointer-events: none;
+}
+
+.al-scrub-grab {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 14px;
+  margin-left: -7px;
+  border-radius: 4px;
+  background: var(--al-accent);
+  box-shadow: 0 0 0 2px var(--al-surface);
+  pointer-events: none;
+}
+
+.al-scrub-label {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--al-ink);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
 .al-axis-label {
@@ -185,20 +208,22 @@ body {
   opacity: 0.7;
 }
 
-.al-room-bar {
-  fill: var(--al-room-fill);
-  stroke: none;
-}
-
-.al-room-bar-edge {
+.al-playhead {
   stroke: var(--al-room-stroke);
   stroke-width: 2;
+}
+
+.al-playhead-readout {
+  fill: var(--al-ink);
+  font-size: 10px;
+  font-family: var(--al-font);
+  font-weight: 500;
 }
 
 .al-curve {
   fill: none;
   stroke-width: 2.25;
-  opacity: 0.45;
+  opacity: 0.4;
   transition: opacity 0.18s ease, stroke-width 0.18s ease;
 }
 
@@ -210,19 +235,14 @@ body {
 .al-binary-line {
   stroke-width: 2.5;
   stroke-dasharray: 6 4;
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: ew-resize;
-  transition: opacity 0.18s ease, stroke-width 0.18s ease;
 }
 
 .al-binary-line.active {
   opacity: 1;
   stroke-width: 3.5;
   stroke-dasharray: none;
-}
-
-.al-binary-handle {
-  cursor: ew-resize;
 }
 
 .al-badge {
@@ -241,41 +261,19 @@ body {
   stroke: var(--al-surface);
   stroke-width: 2;
   cursor: grab;
-  transition: r 0.12s ease;
 }
 
-.al-point:hover,
-.al-point.dragging {
-  r: 7;
+.al-point[data-selected="1"] {
+  stroke: var(--al-accent);
+  stroke-width: 2.5;
 }
 
 .al-point.dragging {
   cursor: grabbing;
 }
 
-.al-point-hit {
-  fill: transparent;
-  stroke: none;
-  cursor: pointer;
-}
-
-.al-point-delete {
-  fill: var(--al-danger);
-  stroke: var(--al-surface);
-  stroke-width: 1.5;
-  cursor: pointer;
-}
-
-.al-point-delete-x {
-  fill: none;
-  stroke: var(--al-accent-contrast, #fff);
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  pointer-events: none;
-}
-
 .al-hint {
-  margin: 0.35rem 0.35rem 0;
+  margin: 0.45rem 0.35rem 0;
   color: var(--al-muted);
   font-size: 0.75rem;
 }
@@ -294,6 +292,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  flex-wrap: wrap;
   padding: 0.7rem 1rem;
   font-size: 0.78rem;
   font-weight: 500;
@@ -304,40 +303,68 @@ body {
   background: var(--al-surface-2);
 }
 
-.al-add-row {
+.al-add-row,
+.al-group-row {
   display: flex;
   gap: 0.5rem;
   align-items: center;
   padding: 0.65rem 1rem;
   border-bottom: 1px solid var(--al-border);
-  background: var(--al-surface);
+  flex-wrap: wrap;
 }
 
-.al-add-row .al-select {
+.al-add-row .al-select,
+.al-group-row .al-select,
+.al-group-row .al-input {
   flex: 1;
   min-width: 0;
 }
 
-.al-light-row {
+input[data-group-check]:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+input[data-group-check] {
+  margin-right: 0.35rem;
+  vertical-align: middle;
+  accent-color: var(--al-accent);
+}
+
+.al-series {
+  border-bottom: 1px solid var(--al-border);
+}
+
+.al-series:last-child {
+  border-bottom: none;
+}
+
+.al-light-row,
+.al-group-header {
   display: grid;
   grid-template-columns: 10px 1fr auto;
   gap: 0.75rem;
   align-items: center;
   padding: 0.7rem 1rem;
-  border-bottom: 1px solid var(--al-border);
   cursor: pointer;
   transition: background 0.12s ease;
 }
 
-.al-light-row:last-child {
-  border-bottom: none;
+.al-group-header {
+  background: color-mix(in srgb, var(--al-accent) 8%, var(--al-surface));
 }
 
-.al-light-row:hover {
+.al-light-row.member {
+  padding-left: 1.75rem;
+}
+
+.al-light-row:hover,
+.al-group-header:hover {
   background: var(--al-surface-2);
 }
 
-.al-light-row.selected {
+.al-light-row.selected,
+.al-group-header.selected {
   background: color-mix(in srgb, var(--al-accent) 14%, var(--al-surface));
 }
 
@@ -362,16 +389,10 @@ body {
 
 .al-light-value {
   font-variant-numeric: tabular-nums;
-  color: var(--al-muted);
-  font-size: 0.85rem;
-  text-align: right;
-  line-height: 1.35;
-}
-
-.al-light-value strong {
-  display: block;
   color: var(--al-ink);
+  font-size: 0.9rem;
   font-weight: 500;
+  text-align: right;
 }
 
 .al-status {
@@ -395,25 +416,74 @@ body {
   color: var(--al-muted);
 }
 
+.al-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  background: var(--al-ink);
+  color: var(--al-surface);
+  padding: 0.65rem 0.85rem;
+  border-radius: var(--al-radius);
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  font-size: 0.875rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  z-index: 1000;
+}
+
+.al-toast button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--al-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+}
+
+.al-menu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 10rem;
+  background: var(--al-surface);
+  border: 1px solid var(--al-border);
+  border-radius: var(--al-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 0.25rem 0;
+}
+
+.al-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--al-ink);
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+}
+
+.al-menu button:hover {
+  background: var(--al-surface-2);
+}
+
+.al-menu button.danger {
+  color: var(--al-danger);
+}
+
 @media (max-width: 640px) {
   .al-shell {
     padding: 0.85rem 0.65rem 2rem;
   }
 
-  .al-header {
-    align-items: start;
-  }
-
   .al-actions {
     width: 100%;
-  }
-
-  .al-select {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .al-add-row {
-    flex-wrap: wrap;
   }
 }

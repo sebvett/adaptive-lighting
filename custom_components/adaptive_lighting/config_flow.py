@@ -155,11 +155,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             flat_input = self._flatten_section_input(user_input)
-            # Keep Lightener curves that are managed outside this form.
+            # Keep Lightener curves / Curves-UI groups managed outside this form.
             if "brightness_curves" not in flat_input:
                 flat_input["brightness_curves"] = form_data.get(
                     "brightness_curves",
                     conf.options.get("brightness_curves", {}),
+                )
+            if "curve_groups" not in flat_input:
+                flat_input["curve_groups"] = form_data.get(
+                    "curve_groups",
+                    conf.options.get("curve_groups", {}),
                 )
             validate_options(flat_input, errors)
             if not errors:
