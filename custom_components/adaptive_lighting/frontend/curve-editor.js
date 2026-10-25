@@ -210,6 +210,8 @@
         roomPct: 55,
         lightStates: {},
         availableLights: [],
+        /** Entity ids checked for a new Curves-UI group (survives list re-renders). */
+        groupCheckedIds: new Set(),
         status: "",
         undo: null,
       };
@@ -260,8 +262,9 @@
             </div>
             <div class="al-group-row">
               <input class="al-input" data-el="group-name" placeholder="Group name" aria-label="New curve group name" />
-              <button type="button" class="al-btn" data-el="group-btn" title="Group the checked lights under one shared curve">Group checked</button>
+              <button type="button" class="al-btn" data-el="group-btn" title="Group the checked lights under one shared curve (same type only: all dimmable or all on/off)">Group checked</button>
             </div>
+            <p class="al-hint" style="margin:0 1rem 0.65rem">Check lights of the <em>same</em> type to group (dimmable with dimmable, or on/off with on/off). Mixed types stay disabled.</p>
             <div data-el="list"></div>
           </div>
           <div class="al-status" data-el="status"></div>
@@ -361,9 +364,14 @@
         this.state.availableLights = result.available_lights || [];
         if (result.room && document.activeElement !== this.els.scrub) {
           const pct = Number(result.room.brightness_pct) || 0;
-          this.state.roomPct = pct;
+          // Avoid re-render storms that fight the scrub; only bump list chrome
+          // when room % actually changed from an external source.
+          if (pct !== this.state.roomPct) {
+            this.state.roomPct = pct;
+          }
         }
         this.fillAddSelect();
+        // Re-render list/plot but restore group checkboxes from state.groupCheckedIds.
         this.render();
       } catch (_) {
         /* ignore */
@@ -378,6 +386,7 @@
       this.state.lightStates = payload.light_states || {};
       this.state.availableLights = payload.available_lights || [];
       this.state.curveGroups = payload.curve_groups || {};
+      this.state.groupCheckedIds = new Set();
       const roomPct = Number(payload.room?.brightness_pct);
       this.state.roomPct = Number.isFinite(roomPct) ? roomPct : 55;
       const binarySet = new Set(payload.binary_lights || []);
@@ -599,19 +608,51 @@
       }
     }
 
+    isBinaryLight(entityId) {
+      return Boolean(this.state.curves[entityId]?.binary);
+    }
+
+    /** "binary" | "dimmable" | null based on current groupCheckedIds. */
+    groupSelectionKind() {
+      const ids = [...this.state.groupCheckedIds];
+      if (!ids.length) return null;
+      return this.isBinaryLight(ids[0]) ? "binary" : "dimmable";
+    }
+
+    toggleGroupCheck(entityId, checked) {
+      if (!checked) {
+        this.state.groupCheckedIds.delete(entityId);
+        this.renderList();
+        return;
+      }
+      const kind = this.isBinaryLight(entityId) ? "binary" : "dimmable";
+      const current = this.groupSelectionKind();
+      if (current && current !== kind) {
+        this.setStatus(
+          "Cannot mix on/off (binary) lights with dimmable/CCT lights in one curve group. Clear the other type first.",
+          "error"
+        );
+        this.renderList(); // restore unchecked state for the incompatible box
+        return;
+      }
+      this.state.groupCheckedIds.add(entityId);
+      this.renderList();
+    }
+
     groupChecked() {
-      const boxes = [
-        ...this.els.list.querySelectorAll('input[data-group-check]:checked'),
-      ];
-      const members = boxes.map((b) => b.value).filter(Boolean);
+      const members = [...this.state.groupCheckedIds].filter((id) =>
+        this.state.lights.includes(id)
+      );
       if (members.length < 2) {
         this.setStatus("Check at least two lights to form a Curves-UI group.", "error");
         return;
       }
-      // Refuse mixing binary + dimmable.
-      const bins = members.map((m) => Boolean(this.state.curves[m]?.binary));
+      const bins = members.map((m) => this.isBinaryLight(m));
       if (bins.some((b) => b) && bins.some((b) => !b)) {
-        this.setStatus("Cannot mix on/off and dimmable lights in one curve group.", "error");
+        this.setStatus(
+          "Cannot mix on/off and dimmable lights in one curve group.",
+          "error"
+        );
         return;
       }
       // Remove members from any existing groups.
@@ -641,6 +682,7 @@
             };
       }
       this.state.selectedSeries = id;
+      this.state.groupCheckedIds = new Set();
       this.els.groupName.value = "";
       this.markDirty();
       this.render();
@@ -786,9 +828,18 @@
           const haBadge = st?.is_ha_light_group
             ? `<span class="al-badge">HA light group</span>`
             : "";
-          const checkable = !groupedMembers.has(id)
-            ? `<input type="checkbox" data-group-check value="${escapeAttr(id)}" aria-label="Include in new curve group" onclick="event.stopPropagation()" />`
-            : "";
+          const selectionKind = this.groupSelectionKind();
+          const thisKind = curve?.binary ? "binary" : "dimmable";
+          const incompatible =
+            selectionKind != null && selectionKind !== thisKind;
+          const checked = this.state.groupCheckedIds.has(id);
+          let checkable = "";
+          if (!groupedMembers.has(id)) {
+            const title = incompatible
+              ? "Cannot mix on/off lights with dimmable lights in one curve group"
+              : "Include in new curve group";
+            checkable = `<input type="checkbox" data-group-check value="${escapeAttr(id)}" aria-label="${escapeAttr(title)}" title="${escapeAttr(title)}" ${checked ? "checked" : ""} ${incompatible ? "disabled" : ""} onclick="event.stopPropagation()" />`;
+          }
           html += `
             <div class="al-series">
               <div class="al-light-row ${selected}" data-series="${escapeAttr(id)}" role="button" tabindex="0">
@@ -803,6 +854,14 @@
         }
       });
       this.els.list.innerHTML = html;
+
+      this.els.list.querySelectorAll("input[data-group-check]").forEach((box) => {
+        box.addEventListener("change", (e) => {
+          e.stopPropagation();
+          this.toggleGroupCheck(box.value, box.checked);
+        });
+        box.addEventListener("click", (e) => e.stopPropagation());
+      });
 
       this.els.list.querySelectorAll("[data-series]").forEach((el) => {
         const activate = () => {

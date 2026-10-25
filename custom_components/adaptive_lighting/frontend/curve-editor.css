@@ -320,6 +320,17 @@ body {
   min-width: 0;
 }
 
+input[data-group-check]:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+input[data-group-check] {
+  margin-right: 0.35rem;
+  vertical-align: middle;
+  accent-color: var(--al-accent);
+}
+
 .al-series {
   border-bottom: 1px solid var(--al-border);
 }

@@ -191,10 +191,16 @@ def _available_lights(hass: HomeAssistant, current: list[str]) -> list[dict[str,
 def _normalize_curve_groups(
     raw: Any,
     lights: set[str],
+    binary_lights: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Clean Curves-UI group metadata; drop unknown members / empty groups."""
+    """Clean Curves-UI group metadata; drop unknown members / empty groups.
+
+    Rejects groups that mix binary (on/off) lights with dimmable lights.
+    Same-type groups (all binary or all dimmable) are allowed.
+    """
     if not isinstance(raw, dict):
         return {}
+    binary = binary_lights or set()
     used: set[str] = set()
     cleaned: dict[str, dict[str, Any]] = {}
     for group_id, payload in raw.items():
@@ -212,6 +218,16 @@ def _normalize_curve_groups(
             members.append(eid)
             used.add(eid)
         if len(members) < 2:
+            continue
+        member_binary = [eid in binary for eid in members]
+        if any(member_binary) and not all(member_binary):
+            _LOGGER.warning(
+                "Dropping curve group %s: cannot mix on/off and dimmable lights (%s)",
+                group_id,
+                members,
+            )
+            for eid in members:
+                used.discard(eid)
             continue
         name = payload.get("name") or f"Group ({len(members)})"
         cleaned[group_id] = {
@@ -284,6 +300,7 @@ def _curves_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     curve_groups = _normalize_curve_groups(
         data.get(CONF_CURVE_GROUPS, {}),
         set(lights),
+        binary_lights,
     )
     return {
         "entry_id": entry.entry_id,
@@ -389,11 +406,12 @@ def ws_save_curves(
             cleaned[entity_id] = result
 
     if "curve_groups" in msg:
-        groups = _normalize_curve_groups(msg["curve_groups"], lights)
+        groups = _normalize_curve_groups(msg["curve_groups"], lights, binary_lights)
     else:
         groups = _normalize_curve_groups(
             entry.options.get(CONF_CURVE_GROUPS, {}),
             lights,
+            binary_lights,
         )
     _sync_group_curves(cleaned, groups, binary_lights)
 
@@ -501,7 +519,12 @@ def ws_update_lights(
 
     curves = dict(entry.options.get(CONF_BRIGHTNESS_CURVES, {}))
     curves = {eid: cfg for eid, cfg in curves.items() if eid in seen}
-    groups = _normalize_curve_groups(entry.options.get(CONF_CURVE_GROUPS, {}), seen)
+    binary_for_groups = {eid for eid in seen if is_binary_light(hass, eid)}
+    groups = _normalize_curve_groups(
+        entry.options.get(CONF_CURVE_GROUPS, {}),
+        seen,
+        binary_for_groups,
+    )
     new_options = {
         **entry.options,
         CONF_LIGHTS: cleaned,
