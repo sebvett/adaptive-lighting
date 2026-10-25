@@ -1,10 +1,8 @@
 /**
- * Adaptive Lighting — Lightener-style brightness curve editor.
+ * Adaptive Lighting — Axis Playhead curve editor (Option A).
  *
- * X axis: virtual / room brightness (0–100%)
- * Y axis: real light brightness (0–100%)
- *
- * Binary (on/off) lights are vertical threshold lines that drag horizontally only.
+ * Room brightness = playhead on the X axis + scrub strip (live, throttled).
+ * Curves-UI groups share one series line (not HA light groups).
  */
 (() => {
   const COLORS = [
@@ -21,6 +19,7 @@
   const PAD = { l: 44, r: 16, t: 20, b: 36 };
   const VB = { w: 720, h: 420 };
   const DEFAULT_BINARY_THRESHOLD = 50;
+  const LIVE_THROTTLE_MS = 160;
 
   function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
@@ -54,6 +53,7 @@
   }
 
   function sampleCurve(curve, x) {
+    if (!curve) return 0;
     if (curve.binary) {
       return x >= curve.threshold ? 100 : 0;
     }
@@ -86,8 +86,7 @@
   }
 
   function polyline(points) {
-    const prepared = preparePoints(points);
-    return prepared
+    return preparePoints(points)
       .map(
         (p, i) =>
           `${i ? "L" : "M"}${toSvgX(p.virtual).toFixed(1)},${toSvgY(p.real).toFixed(1)}`
@@ -102,22 +101,24 @@
     return DEFAULT_BINARY_THRESHOLD;
   }
 
+  function newGroupId() {
+    return `cg_${Math.random().toString(36).slice(2, 12)}`;
+  }
+
   const DEMO = {
     entry_id: "demo",
     title: "Living Room",
     lights: [
       "light.ceiling",
       "light.sofa_lamp",
-      "light.led_strip",
-      "light.floor_lamp",
       "light.closet_switch",
+      "light.floor_lamp",
     ],
     names: {
       "light.ceiling": "Ceiling",
       "light.sofa_lamp": "Sofa lamp",
-      "light.led_strip": "LED strip",
-      "light.floor_lamp": "Floor lamp",
       "light.closet_switch": "Closet (on/off)",
+      "light.floor_lamp": "Floor lamp",
     },
     binary_lights: ["light.closet_switch"],
     curves: {
@@ -134,8 +135,10 @@
           { virtual: 100, real: 40 },
         ],
       },
-      "light.led_strip": {
-        points: [{ virtual: 80, real: 100 }],
+      "light.closet_switch": {
+        binary: true,
+        threshold: 45,
+        points: [{ virtual: 45, real: 100 }],
       },
       "light.floor_lamp": {
         points: [
@@ -143,24 +146,50 @@
           { virtual: 100, real: 100 },
         ],
       },
-      "light.closet_switch": {
-        binary: true,
-        threshold: 45,
-        points: [{ virtual: 45, real: 100 }],
+    },
+    curve_groups: {
+      cg_demo1: {
+        name: "Lounge pair",
+        members: ["light.sofa_lamp", "light.floor_lamp"],
       },
     },
-    room: { entity_id: "light.living_room_room", state: "on", brightness: 140, brightness_pct: 55 },
-    light_states: {
-      "light.ceiling": { state: "off", brightness: 0, brightness_pct: 0, binary: false },
-      "light.sofa_lamp": { state: "on", brightness: 180, brightness_pct: 71, binary: false },
-      "light.led_strip": { state: "off", brightness: 0, brightness_pct: 0, binary: false },
-      "light.floor_lamp": { state: "on", brightness: 90, brightness_pct: 35, binary: false },
-      "light.closet_switch": { state: "on", brightness: null, brightness_pct: 100, binary: true },
+    room: {
+      entity_id: "light.living_room_room",
+      state: "on",
+      brightness: 140,
+      brightness_pct: 55,
     },
-    available_lights: [
-      { entity_id: "light.hallway", name: "Hallway" },
-      { entity_id: "light.desk", name: "Desk lamp" },
-    ],
+    light_states: {
+      "light.ceiling": {
+        state: "off",
+        brightness: 0,
+        brightness_pct: 0,
+        binary: false,
+        is_ha_light_group: false,
+      },
+      "light.sofa_lamp": {
+        state: "on",
+        brightness: 180,
+        brightness_pct: 71,
+        binary: false,
+        is_ha_light_group: false,
+      },
+      "light.closet_switch": {
+        state: "on",
+        brightness: null,
+        brightness_pct: 100,
+        binary: true,
+        is_ha_light_group: false,
+      },
+      "light.floor_lamp": {
+        state: "on",
+        brightness: 90,
+        brightness_pct: 35,
+        binary: false,
+        is_ha_light_group: false,
+      },
+    },
+    available_lights: [{ entity_id: "light.hallway", name: "Hallway" }],
   };
 
   class CurveEditor {
@@ -174,20 +203,21 @@
         lights: [],
         names: {},
         curves: {},
-        selected: null,
+        curveGroups: {},
+        selectedSeries: null, // light entity_id OR group id
+        selectedPointVirtual: null,
         dirty: false,
-        scrub: 55,
         roomPct: 55,
-        roomEntity: null,
         lightStates: {},
         availableLights: [],
         status: "",
-        statusKind: "",
-        selectedPointVirtual: null,
+        undo: null,
       };
       this.drag = null;
-      this._roomSliderTimer = null;
+      this._liveTimer = null;
+      this._livePending = null;
       this._pollTimer = null;
+      this._toastTimer = null;
       this._build();
       this._bind();
       this.init();
@@ -199,51 +229,63 @@
           <header class="al-header">
             <div>
               <h1>Brightness curves</h1>
-              <p>Virtual room brightness on the X axis, each real light on the Y axis — Lightener mapping inside Adaptive Lighting. On/off lights are vertical thresholds you drag sideways.</p>
+              <p>Scrub the room playhead under the plot — it drives room brightness live. Curves-UI groups share one line (separate from Home Assistant light groups).</p>
             </div>
             <div class="al-actions">
               <select class="al-select" data-el="instance" aria-label="Adaptive Lighting instance"></select>
-              <button type="button" class="al-btn" data-el="reset" title="Reset selected light">Reset light</button>
-              <button type="button" class="al-btn danger" data-el="delete-point" title="Remove selected curve point" disabled>Remove point</button>
+              <button type="button" class="al-btn" data-el="reset">Reset series</button>
               <button type="button" class="al-btn primary" data-el="save" disabled>Save</button>
             </div>
           </header>
           <div class="al-plot-card">
             <div class="al-plot-meta">
               <span>Room → light response</span>
-              <div class="al-room-control">
-                <label for="al-room-slider">Room brightness</label>
-                <input id="al-room-slider" type="range" min="0" max="100" step="1" data-el="room-slider" />
-                <span class="al-room-pct" data-el="room-pct">55%</span>
-              </div>
+              <span>Room <strong data-el="room-pct">55%</strong> · drag scrub strip or playhead</span>
             </div>
             <svg id="al-plot" viewBox="0 0 ${VB.w} ${VB.h}" role="img" aria-label="Brightness curve plot"></svg>
-            <p class="al-hint">Coloured bar shows current room %. Click a point then Remove point (or Delete / double-click) to delete it. Drag the scrub line to preview curve outputs.</p>
+            <div class="al-scrub-strip" data-el="scrub" role="slider" aria-valuemin="0" aria-valuemax="100" aria-label="Room brightness">
+              <div class="al-scrub-fill" data-el="scrub-fill"></div>
+              <div class="al-scrub-grab" data-el="scrub-grab"></div>
+              <span class="al-scrub-label" data-el="scrub-label">55%</span>
+            </div>
+            <p class="al-hint">Select a point, then Delete/Backspace (or right-click → Delete). Endpoints at 0% / 100% stay locked. Undo appears after delete.</p>
           </div>
           <div class="al-lights">
             <div class="al-lights-title">
-              <span>Lights in this room</span>
+              <span>Lights &amp; curve groups</span>
             </div>
-            <div class="al-add-row" data-el="add-row">
+            <div class="al-add-row">
               <select class="al-select" data-el="add-select" aria-label="Add light"></select>
               <button type="button" class="al-btn" data-el="add-btn">Add light</button>
+            </div>
+            <div class="al-group-row">
+              <input class="al-input" data-el="group-name" placeholder="Group name" aria-label="New curve group name" />
+              <button type="button" class="al-btn" data-el="group-btn" title="Group the checked lights under one shared curve">Group checked</button>
             </div>
             <div data-el="list"></div>
           </div>
           <div class="al-status" data-el="status"></div>
+          <div data-el="toast-host"></div>
+          <div data-el="menu-host"></div>
         </div>
       `;
       this.els = {
         instance: this.root.querySelector('[data-el="instance"]'),
         reset: this.root.querySelector('[data-el="reset"]'),
-        deletePoint: this.root.querySelector('[data-el="delete-point"]'),
         save: this.root.querySelector('[data-el="save"]'),
         list: this.root.querySelector('[data-el="list"]'),
         status: this.root.querySelector('[data-el="status"]'),
-        roomSlider: this.root.querySelector('[data-el="room-slider"]'),
         roomPct: this.root.querySelector('[data-el="room-pct"]'),
+        scrub: this.root.querySelector('[data-el="scrub"]'),
+        scrubFill: this.root.querySelector('[data-el="scrub-fill"]'),
+        scrubGrab: this.root.querySelector('[data-el="scrub-grab"]'),
+        scrubLabel: this.root.querySelector('[data-el="scrub-label"]'),
         addSelect: this.root.querySelector('[data-el="add-select"]'),
         addBtn: this.root.querySelector('[data-el="add-btn"]'),
+        groupName: this.root.querySelector('[data-el="group-name"]'),
+        groupBtn: this.root.querySelector('[data-el="group-btn"]'),
+        toastHost: this.root.querySelector('[data-el="toast-host"]'),
+        menuHost: this.root.querySelector('[data-el="menu-host"]'),
         svg: this.root.querySelector("#al-plot"),
       };
     }
@@ -254,47 +296,16 @@
       });
       this.els.save.addEventListener("click", () => this.save());
       this.els.reset.addEventListener("click", () => this.resetSelected());
-      this.els.deletePoint.addEventListener("click", () => this.deleteSelectedPoint());
       this.els.addBtn.addEventListener("click", () => this.addSelectedLight());
-      this.els.roomSlider.addEventListener("input", () => {
-        const pct = Number(this.els.roomSlider.value);
-        this.state.roomPct = pct;
-        this.state.scrub = pct;
-        this.els.roomPct.textContent = `${Math.round(pct)}%`;
-        this.renderPlot();
-        this.renderList();
-      });
-      this.els.roomSlider.addEventListener("change", () => {
-        this.applyRoomBrightness(Number(this.els.roomSlider.value));
-      });
-      this.els.svg.addEventListener("pointerdown", (e) => this.onPointerDown(e));
-      this.els.svg.addEventListener("dblclick", (e) => this.onDoubleClick(e));
+      this.els.groupBtn.addEventListener("click", () => this.groupChecked());
+
+      this.els.scrub.addEventListener("pointerdown", (e) => this.onScrubDown(e));
+      this.els.svg.addEventListener("pointerdown", (e) => this.onPlotDown(e));
+      this.els.svg.addEventListener("contextmenu", (e) => this.onContextMenu(e));
       window.addEventListener("pointermove", (e) => this.onPointerMove(e));
       window.addEventListener("pointerup", () => this.onPointerUp());
-      window.addEventListener("keydown", (e) => {
-        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-          e.preventDefault();
-          if (this.state.dirty) this.save();
-        }
-        if (e.key === "Delete" || e.key === "Backspace") {
-          const tag = (e.target && e.target.tagName) || "";
-          if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-          e.preventDefault();
-          this.deleteSelectedPoint();
-        }
-        if (
-          this.state.selected &&
-          this.state.curves[this.state.selected]?.binary &&
-          (e.key === "ArrowLeft" || e.key === "ArrowRight")
-        ) {
-          e.preventDefault();
-          const delta = e.key === "ArrowLeft" ? -1 : 1;
-          const curve = this.state.curves[this.state.selected];
-          curve.threshold = clamp(curve.threshold + delta, 1, 100);
-          this.markDirty();
-          this.render();
-        }
-      });
+      window.addEventListener("keydown", (e) => this.onKeyDown(e));
+      window.addEventListener("click", () => this.hideMenu());
     }
 
     async init() {
@@ -302,10 +313,7 @@
         this.state.instances = [{ entry_id: "demo", title: DEMO.title }];
         this.fillInstances();
         this.applyPayload(DEMO);
-        this.setStatus(
-          "Demo mode — drag the closet’s vertical line sideways; dimmable lights keep freeform curves.",
-          ""
-        );
+        this.setStatus("Demo mode — scrub strip drives the playhead; Group checked creates a UI curve group.", "");
         return;
       }
       try {
@@ -351,21 +359,14 @@
         });
         this.state.lightStates = result.light_states || {};
         this.state.availableLights = result.available_lights || [];
-        if (result.room) {
+        if (result.room && document.activeElement !== this.els.scrub) {
           const pct = Number(result.room.brightness_pct) || 0;
-          // Don't fight the user while they are dragging the slider.
-          if (document.activeElement !== this.els.roomSlider) {
-            this.state.roomPct = pct;
-            this.state.scrub = pct;
-            this.els.roomSlider.value = String(pct);
-            this.els.roomPct.textContent = `${Math.round(pct)}%`;
-          }
+          this.state.roomPct = pct;
         }
         this.fillAddSelect();
-        this.renderPlot();
-        this.renderList();
+        this.render();
       } catch (_) {
-        /* transient */
+        /* ignore */
       }
     }
 
@@ -376,12 +377,9 @@
       this.state.names = payload.names || {};
       this.state.lightStates = payload.light_states || {};
       this.state.availableLights = payload.available_lights || [];
-      this.state.roomEntity = payload.room?.entity_id || null;
+      this.state.curveGroups = payload.curve_groups || {};
       const roomPct = Number(payload.room?.brightness_pct);
       this.state.roomPct = Number.isFinite(roomPct) ? roomPct : 55;
-      this.state.scrub = this.state.roomPct;
-      this.els.roomSlider.value = String(this.state.roomPct);
-      this.els.roomPct.textContent = `${Math.round(this.state.roomPct)}%`;
       const binarySet = new Set(payload.binary_lights || []);
       this.state.curves = {};
       for (const id of this.state.lights) {
@@ -408,13 +406,75 @@
           };
         }
       }
-      this.state.selected = this.state.lights[0] || null;
+      const series = this.seriesList();
+      this.state.selectedSeries = series[0]?.id || null;
       this.state.selectedPointVirtual = null;
       this.state.dirty = false;
       this.els.save.disabled = true;
-      this.els.deletePoint.disabled = true;
       this.fillAddSelect();
       this.render();
+    }
+
+    /** Series shown on the plot: one per ungrouped light + one per curve group. */
+    seriesList() {
+      const grouped = new Set();
+      const series = [];
+      for (const [gid, g] of Object.entries(this.state.curveGroups || {})) {
+        const members = (g.members || []).filter((m) =>
+          this.state.lights.includes(m)
+        );
+        if (members.length < 2) continue;
+        members.forEach((m) => grouped.add(m));
+        series.push({
+          id: gid,
+          kind: "group",
+          name: g.name || "Group",
+          members,
+          primary: members[0],
+        });
+      }
+      for (const id of this.state.lights) {
+        if (grouped.has(id)) continue;
+        series.push({
+          id,
+          kind: "light",
+          name: this.state.names[id] || id,
+          members: [id],
+          primary: id,
+        });
+      }
+      return series;
+    }
+
+    selectedSeriesObj() {
+      return this.seriesList().find((s) => s.id === this.state.selectedSeries) || null;
+    }
+
+    selectedCurve() {
+      const s = this.selectedSeriesObj();
+      return s ? this.state.curves[s.primary] : null;
+    }
+
+    /** When editing a group curve, keep all members' curve objects in sync. */
+    syncSelectedGroupCurves() {
+      const s = this.selectedSeriesObj();
+      if (!s || s.kind !== "group") return;
+      const primaryCurve = this.state.curves[s.primary];
+      if (!primaryCurve) return;
+      for (const m of s.members) {
+        if (m === s.primary) continue;
+        this.state.curves[m] = primaryCurve.binary
+          ? {
+              binary: true,
+              threshold: primaryCurve.threshold,
+              points: [{ virtual: primaryCurve.threshold, real: 100 }],
+            }
+          : {
+              binary: false,
+              threshold: DEFAULT_BINARY_THRESHOLD,
+              points: preparePoints(primaryCurve.points),
+            };
+      }
     }
 
     fillAddSelect() {
@@ -426,17 +486,16 @@
         return;
       }
       this.els.addSelect.innerHTML = options
-        .map(
-          (l) =>
-            `<option value="${escapeAttr(l.entity_id)}">${escapeHtml(l.name)} (${escapeHtml(l.entity_id)})</option>`
-        )
+        .map((l) => {
+          const tag = l.is_ha_light_group ? " · HA group" : "";
+          return `<option value="${escapeAttr(l.entity_id)}">${escapeHtml(l.name)}${tag} (${escapeHtml(l.entity_id)})</option>`;
+        })
         .join("");
       this.els.addBtn.disabled = false;
     }
 
     setStatus(text, kind) {
       this.state.status = text;
-      this.state.statusKind = kind || "";
       this.els.status.textContent = text;
       this.els.status.className = `al-status ${kind || ""}`;
     }
@@ -444,27 +503,58 @@
     markDirty() {
       this.state.dirty = true;
       this.els.save.disabled = false;
+      this.syncSelectedGroupCurves();
       this.setStatus("Unsaved curve changes", "");
     }
 
-    selectedCurve() {
-      return this.state.selected ? this.state.curves[this.state.selected] : null;
+    setRoomPct(pct, { live = true } = {}) {
+      this.state.roomPct = clamp(Math.round(pct), 0, 100);
+      this.updateScrubChrome();
+      this.renderPlot();
+      this.renderList();
+      if (live) this.queueLiveRoom(this.state.roomPct);
     }
 
-    updateDeleteButton() {
-      const curve = this.selectedCurve();
-      const can =
-        curve &&
-        !curve.binary &&
-        this.state.selectedPointVirtual != null &&
-        this.state.selectedPointVirtual > 0 &&
-        this.state.selectedPointVirtual < 100;
-      this.els.deletePoint.disabled = !can;
+    updateScrubChrome() {
+      const pct = this.state.roomPct;
+      this.els.roomPct.textContent = `${pct}%`;
+      this.els.scrubLabel.textContent = `${pct}%`;
+      this.els.scrubFill.style.width = `${pct}%`;
+      this.els.scrubGrab.style.left = `${pct}%`;
+      this.els.scrub.setAttribute("aria-valuenow", String(pct));
+    }
+
+    queueLiveRoom(pct) {
+      this._livePending = pct;
+      if (this._liveTimer) return;
+      this._liveTimer = setTimeout(() => {
+        this._liveTimer = null;
+        const next = this._livePending;
+        this._livePending = null;
+        if (next != null) this.applyRoomBrightness(next, { silent: true });
+      }, LIVE_THROTTLE_MS);
+    }
+
+    async applyRoomBrightness(pct, { silent = false } = {}) {
+      if (this.demo) {
+        if (!silent) this.setStatus(`Demo room set to ${pct}%.`, "ok");
+        return;
+      }
+      try {
+        await this.ws("adaptive_lighting/set_room_brightness", {
+          entry_id: this.state.entryId,
+          brightness_pct: Math.round(pct),
+        });
+        if (!silent) this.setStatus(`Room brightness set to ${pct}%.`, "ok");
+        setTimeout(() => this.refreshLiveState(), 500);
+      } catch (err) {
+        this.setStatus(`Could not set room brightness: ${err}`, "error");
+      }
     }
 
     resetSelected() {
-      if (!this.state.selected) return;
-      const curve = this.state.curves[this.state.selected];
+      const curve = this.selectedCurve();
+      if (!curve) return;
       if (curve.binary) {
         curve.threshold = DEFAULT_BINARY_THRESHOLD;
         curve.points = [{ virtual: DEFAULT_BINARY_THRESHOLD, real: 100 }];
@@ -474,29 +564,6 @@
       this.state.selectedPointVirtual = null;
       this.markDirty();
       this.render();
-    }
-
-    async applyRoomBrightness(pct) {
-      if (this.demo) {
-        this.state.roomPct = pct;
-        this.state.scrub = pct;
-        this.setStatus(`Demo room set to ${Math.round(pct)}%.`, "ok");
-        this.render();
-        return;
-      }
-      try {
-        await this.ws("adaptive_lighting/set_room_brightness", {
-          entry_id: this.state.entryId,
-          brightness_pct: Math.round(pct),
-        });
-        this.state.roomPct = pct;
-        this.state.scrub = pct;
-        this.setStatus(`Room brightness set to ${Math.round(pct)}%.`, "ok");
-        // Give HA a moment, then refresh live light levels.
-        setTimeout(() => this.refreshLiveState(), 600);
-      } catch (err) {
-        this.setStatus(`Could not set room brightness: ${err}`, "error");
-      }
     }
 
     async addSelectedLight() {
@@ -511,26 +578,19 @@
           threshold: DEFAULT_BINARY_THRESHOLD,
           points: preparePoints([{ virtual: 100, real: 100 }]),
         };
-        this.state.lightStates[entityId] = {
-          state: "off",
-          brightness: 0,
-          brightness_pct: 0,
-          binary: false,
-        };
         this.state.availableLights = this.state.availableLights.filter(
           (l) => l.entity_id !== entityId
         );
-        this.state.selected = entityId;
+        this.state.selectedSeries = entityId;
         this.fillAddSelect();
         this.markDirty();
         this.render();
         return;
       }
       try {
-        const lights = [...this.state.lights, entityId];
         const result = await this.ws("adaptive_lighting/update_lights", {
           entry_id: this.state.entryId,
-          lights,
+          lights: [...this.state.lights, entityId],
         });
         this.applyPayload(result);
         this.setStatus(`Added ${entityId}.`, "ok");
@@ -539,7 +599,67 @@
       }
     }
 
+    groupChecked() {
+      const boxes = [
+        ...this.els.list.querySelectorAll('input[data-group-check]:checked'),
+      ];
+      const members = boxes.map((b) => b.value).filter(Boolean);
+      if (members.length < 2) {
+        this.setStatus("Check at least two lights to form a Curves-UI group.", "error");
+        return;
+      }
+      // Refuse mixing binary + dimmable.
+      const bins = members.map((m) => Boolean(this.state.curves[m]?.binary));
+      if (bins.some((b) => b) && bins.some((b) => !b)) {
+        this.setStatus("Cannot mix on/off and dimmable lights in one curve group.", "error");
+        return;
+      }
+      // Remove members from any existing groups.
+      for (const [gid, g] of Object.entries(this.state.curveGroups)) {
+        g.members = (g.members || []).filter((m) => !members.includes(m));
+        if (g.members.length < 2) delete this.state.curveGroups[gid];
+      }
+      const id = newGroupId();
+      const name =
+        (this.els.groupName.value || "").trim() ||
+        `Group (${members.length})`;
+      this.state.curveGroups[id] = { name, members };
+      // Sync curves to first member.
+      const primary = members[0];
+      for (const m of members.slice(1)) {
+        const src = this.state.curves[primary];
+        this.state.curves[m] = src.binary
+          ? {
+              binary: true,
+              threshold: src.threshold,
+              points: [{ virtual: src.threshold, real: 100 }],
+            }
+          : {
+              binary: false,
+              threshold: DEFAULT_BINARY_THRESHOLD,
+              points: preparePoints(src.points),
+            };
+      }
+      this.state.selectedSeries = id;
+      this.els.groupName.value = "";
+      this.markDirty();
+      this.render();
+      this.setStatus(`Created curve group “${name}”. Save to persist.`, "ok");
+    }
+
+    ungroup(groupId) {
+      if (!this.state.curveGroups[groupId]) return;
+      const name = this.state.curveGroups[groupId].name;
+      delete this.state.curveGroups[groupId];
+      const series = this.seriesList();
+      this.state.selectedSeries = series[0]?.id || null;
+      this.markDirty();
+      this.render();
+      this.setStatus(`Ungrouped “${name}”. Members keep their curves.`, "ok");
+    }
+
     async save() {
+      this.syncSelectedGroupCurves();
       if (this.demo) {
         this.state.dirty = false;
         this.els.save.disabled = true;
@@ -549,6 +669,7 @@
       const curves = {};
       for (const id of this.state.lights) {
         const curve = this.state.curves[id];
+        if (!curve) continue;
         if (curve.binary) {
           curves[id] = {
             binary: true,
@@ -566,6 +687,7 @@
         await this.ws("adaptive_lighting/save_curves", {
           entry_id: this.state.entryId,
           curves,
+          curve_groups: this.state.curveGroups,
         });
         this.state.dirty = false;
         this.els.save.disabled = true;
@@ -589,68 +711,121 @@
     }
 
     render() {
+      this.updateScrubChrome();
       this.renderPlot();
       this.renderList();
-      this.updateDeleteButton();
-      this.els.roomPct.textContent = `${Math.round(this.state.roomPct)}%`;
     }
 
-    liveBrightnessLabel(id) {
-      const st = this.state.lightStates[id];
-      if (!st) return "—";
-      if (st.state === "unavailable") return "Unavailable";
-      if (st.binary) {
-        return st.state === "on" ? "On" : "Off";
-      }
-      if (st.state !== "on" || st.brightness_pct == null) return "Off";
-      return `${st.brightness_pct}%`;
+    curvePctAtPlayhead(primaryId) {
+      return Math.round(sampleCurve(this.state.curves[primaryId], this.state.roomPct));
     }
 
     renderList() {
-      if (!this.state.lights.length) {
+      const series = this.seriesList();
+      if (!series.length) {
         this.els.list.innerHTML =
-          '<div class="al-empty">Add lights below (or in Adaptive Lighting options), then edit their curves.</div>';
+          '<div class="al-empty">Add lights below, then optionally group them for a shared curve.</div>';
         return;
       }
-      this.els.list.innerHTML = this.state.lights
-        .map((id, idx) => {
-          const color = COLORS[idx % COLORS.length];
-          const name = this.state.names[id] || id;
-          const curve = this.state.curves[id];
-          const preview = Math.round(sampleCurve(curve, this.state.scrub));
-          const live = this.liveBrightnessLabel(id);
-          const selected = id === this.state.selected ? "selected" : "";
-          const previewLabel = curve.binary
-            ? preview >= 100
-              ? "On"
-              : "Off"
-            : `${preview}%`;
-          const badge = curve.binary
-            ? `<span class="al-badge">On/off · ${curve.threshold}%</span>`
+      const groupedMembers = new Set();
+      Object.values(this.state.curveGroups || {}).forEach((g) =>
+        (g.members || []).forEach((m) => groupedMembers.add(m))
+      );
+
+      let html = "";
+      series.forEach((s, idx) => {
+        const color = COLORS[idx % COLORS.length];
+        const selected = s.id === this.state.selectedSeries ? "selected" : "";
+        const pct = this.curvePctAtPlayhead(s.primary);
+        const curve = this.state.curves[s.primary];
+        const badge = curve?.binary
+          ? `<span class="al-badge">On/off · ${curve.threshold}%</span>`
+          : s.kind === "group"
+            ? `<span class="al-badge">Curve group · ${s.members.length}</span>`
             : "";
-          return `
-            <div class="al-light-row ${selected}" data-id="${escapeAttr(id)}" role="button" tabindex="0">
-              <span class="al-swatch" style="background:${color}"></span>
-              <span>
-                <span class="al-light-name">${escapeHtml(name)} ${badge}</span>
-                <span class="al-light-id">${escapeHtml(id)}</span>
-              </span>
-              <span class="al-light-value"><strong>${escapeHtml(live)}</strong>at room ${Math.round(this.state.scrub)}% → ${previewLabel}</span>
+        if (s.kind === "group") {
+          html += `
+            <div class="al-series" data-series="${escapeAttr(s.id)}">
+              <div class="al-group-header ${selected}" data-series="${escapeAttr(s.id)}" role="button" tabindex="0">
+                <span class="al-swatch" style="background:${color}"></span>
+                <span>
+                  <span class="al-light-name">${escapeHtml(s.name)} ${badge}</span>
+                  <span class="al-light-id">${s.members.map(escapeHtml).join(", ")}</span>
+                </span>
+                <span class="al-light-value" style="display:flex;gap:0.5rem;align-items:center">
+                  ${curve?.binary ? (pct >= 100 ? "On" : "Off") : `${pct}%`}
+                  <button type="button" class="al-btn" data-ungroup="${escapeAttr(s.id)}" style="padding:0.2rem 0.5rem;font-size:0.75rem">Ungroup</button>
+                </span>
+              </div>
+              ${s.members
+                .map((m) => {
+                  const st = this.state.lightStates[m];
+                  const live =
+                    st?.binary
+                      ? st.state === "on"
+                        ? "On"
+                        : "Off"
+                      : st?.state === "on" && st.brightness_pct != null
+                        ? `${st.brightness_pct}%`
+                        : "Off";
+                  return `
+                  <div class="al-light-row member" data-id="${escapeAttr(m)}">
+                    <span class="al-swatch" style="background:${color};opacity:.5"></span>
+                    <span>
+                      <span class="al-light-name">${escapeHtml(this.state.names[m] || m)}</span>
+                      <span class="al-light-id">${escapeHtml(m)}</span>
+                    </span>
+                    <span class="al-light-value">${escapeHtml(live)}</span>
+                  </div>`;
+                })
+                .join("")}
             </div>`;
-        })
-        .join("");
-      this.els.list.querySelectorAll(".al-light-row").forEach((row) => {
+        } else {
+          const id = s.primary;
+          const st = this.state.lightStates[id];
+          const haBadge = st?.is_ha_light_group
+            ? `<span class="al-badge">HA light group</span>`
+            : "";
+          const checkable = !groupedMembers.has(id)
+            ? `<input type="checkbox" data-group-check value="${escapeAttr(id)}" aria-label="Include in new curve group" onclick="event.stopPropagation()" />`
+            : "";
+          html += `
+            <div class="al-series">
+              <div class="al-light-row ${selected}" data-series="${escapeAttr(id)}" role="button" tabindex="0">
+                <span class="al-swatch" style="background:${color}"></span>
+                <span>
+                  <span class="al-light-name">${checkable} ${escapeHtml(s.name)} ${badge}${haBadge}</span>
+                  <span class="al-light-id">${escapeHtml(id)}</span>
+                </span>
+                <span class="al-light-value">${curve?.binary ? (pct >= 100 ? "On" : "Off") : `${pct}%`}</span>
+              </div>
+            </div>`;
+        }
+      });
+      this.els.list.innerHTML = html;
+
+      this.els.list.querySelectorAll("[data-series]").forEach((el) => {
         const activate = () => {
-          this.state.selected = row.dataset.id;
+          this.state.selectedSeries = el.dataset.series;
           this.state.selectedPointVirtual = null;
+          this.hideMenu();
           this.render();
         };
-        row.addEventListener("click", activate);
-        row.addEventListener("keydown", (e) => {
+        el.addEventListener("click", (e) => {
+          if (e.target.closest("[data-ungroup], input")) return;
+          activate();
+        });
+        el.addEventListener("keydown", (e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             activate();
           }
+        });
+      });
+      this.els.list.querySelectorAll("[data-ungroup]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.ungroup(btn.dataset.ungroup);
         });
       });
     }
@@ -673,69 +848,70 @@
         );
       }
       grid.push(
-        `<text class="al-axis-label" x="${VB.w / 2}" y="${VB.h - 2}" text-anchor="middle">Virtual light brightness %</text>`
+        `<text class="al-axis-label" x="${VB.w / 2}" y="${VB.h - 2}" text-anchor="middle">Virtual / room brightness %</text>`
       );
       grid.push(
         `<text class="al-axis-label" x="14" y="${VB.h / 2}" text-anchor="middle" transform="rotate(-90 14 ${VB.h / 2})">Real light brightness %</text>`
       );
 
-      // Current room brightness — filled bar along the X axis.
-      const roomPct = clamp(this.state.roomPct, 0, 100);
-      const barY = VB.h - PAD.b;
-      const barH = 10;
-      const roomBar = `
-        <rect class="al-room-bar" x="${PAD.l}" y="${barY - barH}" width="${Math.max(0, toSvgX(roomPct) - PAD.l)}" height="${barH}" rx="2" />
-        <line class="al-room-bar-edge" x1="${toSvgX(roomPct)}" y1="${PAD.t}" x2="${toSvgX(roomPct)}" y2="${VB.h - PAD.b}" />
-      `;
-
-      const curves = this.state.lights
-        .map((id, idx) => {
-          const active = id === this.state.selected ? "active" : "";
+      const series = this.seriesList();
+      const curves = series
+        .map((s, idx) => {
+          const active = s.id === this.state.selectedSeries ? "active" : "";
           const color = COLORS[idx % COLORS.length];
-          const curve = this.state.curves[id];
+          const curve = this.state.curves[s.primary];
+          if (!curve) return "";
           if (curve.binary) {
             const x = toSvgX(curve.threshold);
-            return `<line class="al-binary-line ${active}" data-id="${escapeAttr(id)}" data-binary="1" stroke="${color}" x1="${x}" y1="${PAD.t}" x2="${x}" y2="${VB.h - PAD.b}" />`;
+            return `<line class="al-binary-line ${active}" data-series="${escapeAttr(s.id)}" data-binary="1" stroke="${color}" x1="${x}" y1="${PAD.t}" x2="${x}" y2="${VB.h - PAD.b}" />`;
           }
-          return `<path class="al-curve ${active}" data-id="${escapeAttr(id)}" stroke="${color}" d="${polyline(curve.points)}" />`;
+          return `<path class="al-curve ${active}" data-series="${escapeAttr(s.id)}" stroke="${color}" d="${polyline(curve.points)}" />`;
         })
         .join("");
 
-      const scrubX = toSvgX(this.state.scrub);
-      const scrub = `<line x1="${scrubX}" y1="${PAD.t}" x2="${scrubX}" y2="${VB.h - PAD.b}" stroke="var(--al-muted)" stroke-dasharray="4 4" stroke-width="1.5" opacity="0.7" />`;
+      const roomPct = this.state.roomPct;
+      const playX = toSvgX(roomPct);
+      let readouts = "";
+      series.forEach((s, idx) => {
+        const y = sampleCurve(this.state.curves[s.primary], roomPct);
+        const color = COLORS[idx % COLORS.length];
+        const label = s.kind === "group" ? s.name : s.name;
+        const short = escapeHtml(String(label).slice(0, 12));
+        const val = this.state.curves[s.primary]?.binary
+          ? y >= 100
+            ? "on"
+            : "off"
+          : `${Math.round(y)}%`;
+        readouts += `<circle cx="${playX}" cy="${toSvgY(y)}" r="3.5" fill="${color}" />`;
+        readouts += `<text class="al-playhead-readout" x="${playX + 6}" y="${toSvgY(y) + 3}" fill="${color}">${short} ${val}</text>`;
+      });
+      const playhead = `<line class="al-playhead" x1="${playX}" y1="${PAD.t}" x2="${playX}" y2="${VB.h - PAD.b}" />`;
 
       let points = "";
       const selected = this.selectedCurve();
-      if (selected && this.state.selected) {
+      const selSeries = this.selectedSeriesObj();
+      if (selected && selSeries) {
         const color =
-          COLORS[this.state.lights.indexOf(this.state.selected) % COLORS.length];
+          COLORS[
+            series.findIndex((s) => s.id === selSeries.id) % COLORS.length
+          ];
         if (selected.binary) {
           const x = toSvgX(selected.threshold);
           const yMid = (PAD.t + (VB.h - PAD.b)) / 2;
           points = `<circle class="al-point al-binary-handle" data-index="threshold" cx="${x}" cy="${yMid}" r="7" fill="${color}" />`;
-          points += `<text class="al-axis-label" x="${x}" y="${PAD.t - 2}" text-anchor="middle">${selected.threshold}%</text>`;
         } else {
           const editable = selected.points.filter(
             (p) => p.virtual > 0 && p.virtual < 100
           );
           points = editable
             .map((p, i) => {
-              const selectedPt =
+              const sel =
                 this.state.selectedPointVirtual === p.virtual ? "1" : "0";
-              let html = `<circle class="al-point" data-index="${i}" data-virtual="${p.virtual}" data-selected="${selectedPt}" cx="${toSvgX(p.virtual)}" cy="${toSvgY(p.real)}" r="${selectedPt === "1" ? 7 : 5.5}" fill="${color}" />`;
-              if (selectedPt === "1") {
-                const cx = toSvgX(p.virtual) + 10;
-                const cy = toSvgY(p.real) - 10;
-                html += `
-                  <circle class="al-point-delete" data-virtual="${p.virtual}" cx="${cx}" cy="${cy}" r="7" />
-                  <path class="al-point-delete-x" d="M${cx - 3},${cy - 3} L${cx + 3},${cy + 3} M${cx + 3},${cy - 3} L${cx - 3},${cy + 3}" />
-                `;
-              }
-              return html;
+              return `<circle class="al-point" data-index="${i}" data-virtual="${p.virtual}" data-selected="${sel}" cx="${toSvgX(p.virtual)}" cy="${toSvgY(p.real)}" r="${sel === "1" ? 7 : 5.5}" fill="${color}" />`;
             })
             .join("");
-          const ends = selected.points.filter((p) => p.virtual === 100);
-          points += ends
+          points += selected.points
+            .filter((p) => p.virtual === 100)
             .map(
               (p) =>
                 `<circle class="al-point" data-index="end100" cx="${toSvgX(100)}" cy="${toSvgY(p.real)}" r="5.5" fill="${color}" />`
@@ -744,27 +920,19 @@
         }
       }
 
-      svg.innerHTML = `${grid.join("")}${roomBar}${curves}${scrub}${points}`;
+      svg.innerHTML = `${grid.join("")}${curves}${playhead}${readouts}${points}`;
       svg.querySelectorAll(".al-curve, .al-binary-line").forEach((el) => {
         el.addEventListener("pointerdown", (e) => {
           e.stopPropagation();
-          this.state.selected = el.dataset.id;
+          this.state.selectedSeries = el.dataset.series;
           this.state.selectedPointVirtual = null;
           if (el.dataset.binary) {
-            this.drag = { index: "threshold", moved: false, binary: true };
+            this.drag = { kind: "threshold", moved: false };
             e.preventDefault();
           } else {
             this.maybeAddPoint(e);
           }
           this.render();
-        });
-      });
-      svg.querySelectorAll(".al-point-delete").forEach((el) => {
-        el.addEventListener("pointerdown", (e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          this.state.selectedPointVirtual = Number(el.dataset.virtual);
-          this.deleteSelectedPoint();
         });
       });
     }
@@ -776,50 +944,57 @@
       pt.y = evt.clientY;
       const ctm = svg.getScreenCTM();
       if (!ctm) return { x: 0, y: 0 };
-      const local = pt.matrixTransform(ctm.inverse());
-      return { x: local.x, y: local.y };
+      return pt.matrixTransform(ctm.inverse());
     }
 
-    onPointerDown(evt) {
+    scrubPctFromEvent(evt) {
+      const rect = this.els.scrub.getBoundingClientRect();
+      if (!rect.width) return this.state.roomPct;
+      return clamp(((evt.clientX - rect.left) / rect.width) * 100, 0, 100);
+    }
+
+    onScrubDown(evt) {
+      this.hideMenu();
+      this.drag = { kind: "scrub" };
+      this.els.scrub.setPointerCapture?.(evt.pointerId);
+      this.setRoomPct(this.scrubPctFromEvent(evt), { live: true });
+      evt.preventDefault();
+    }
+
+    onPlotDown(evt) {
+      this.hideMenu();
       const target = evt.target;
-      if (target.classList.contains("al-point-delete")) {
-        return;
-      }
       if (target.classList.contains("al-point")) {
         const idx = target.dataset.index;
-        const binary = target.classList.contains("al-binary-handle");
-        this.drag = { index: idx, moved: false, binary };
+        this.drag = {
+          kind: target.classList.contains("al-binary-handle")
+            ? "threshold"
+            : "point",
+          index: idx,
+          moved: false,
+        };
         if (target.dataset.virtual != null) {
           this.state.selectedPointVirtual = Number(target.dataset.virtual);
-        } else if (idx === "end100") {
+        } else {
           this.state.selectedPointVirtual = null;
         }
         target.classList.add("dragging");
-        this.updateDeleteButton();
         evt.preventDefault();
+        this.renderPlot();
         return;
       }
+      // Click empty plot: move playhead (live).
       const { x } = this.svgPoint(evt);
-      this.state.scrub = fromSvgX(x);
+      this.drag = { kind: "scrub-plot" };
+      this.setRoomPct(fromSvgX(x), { live: true });
       const selected = this.selectedCurve();
-      if (selected && !selected.binary) {
-        this.maybeAddPoint(evt);
-      }
-      this.render();
-    }
-
-    onDoubleClick(evt) {
-      const target = evt.target;
-      if (target.classList.contains("al-point") && target.dataset.virtual != null) {
-        this.state.selectedPointVirtual = Number(target.dataset.virtual);
-        this.deleteSelectedPoint();
-        evt.preventDefault();
-      }
+      if (selected && !selected.binary) this.maybeAddPoint(evt);
+      evt.preventDefault();
     }
 
     maybeAddPoint(evt) {
       const selected = this.selectedCurve();
-      if (!selected || selected.binary || !this.state.selected) return;
+      if (!selected || selected.binary) return;
       const { x, y } = this.svgPoint(evt);
       const virtual = Math.round(fromSvgX(x));
       const real = Math.round(fromSvgY(y));
@@ -831,8 +1006,9 @@
         return;
       }
       const onCurve = sampleCurve(selected, virtual);
-      const dist = Math.abs(toSvgY(onCurve) - y);
-      if (dist > 14 && Math.abs(onCurve - real) > 8) return;
+      if (Math.abs(toSvgY(onCurve) - y) > 14 && Math.abs(onCurve - real) > 8) {
+        return;
+      }
       points.push({ virtual, real });
       selected.points = preparePoints(points);
       this.state.selectedPointVirtual = virtual;
@@ -840,20 +1016,19 @@
     }
 
     onPointerMove(evt) {
-      if (!this.drag || !this.state.selected) {
-        if (evt.buttons === 1 && evt.target === this.els.svg) {
-          const { x } = this.svgPoint(evt);
-          this.state.scrub = fromSvgX(x);
-          this.renderList();
-          this.renderPlot();
-        }
+      if (!this.drag) return;
+      if (this.drag.kind === "scrub" || this.drag.kind === "scrub-plot") {
+        const pct =
+          this.drag.kind === "scrub"
+            ? this.scrubPctFromEvent(evt)
+            : fromSvgX(this.svgPoint(evt).x);
+        this.setRoomPct(pct, { live: true });
         return;
       }
-
-      const curve = this.state.curves[this.state.selected];
+      const curve = this.selectedCurve();
+      if (!curve) return;
       const { x, y } = this.svgPoint(evt);
-
-      if (this.drag.binary || curve.binary) {
+      if (this.drag.kind === "threshold" || curve.binary) {
         curve.threshold = clamp(Math.round(fromSvgX(x)), 1, 100);
         curve.points = [{ virtual: curve.threshold, real: 100 }];
         this.drag.moved = true;
@@ -861,12 +1036,10 @@
         this.render();
         return;
       }
-
       let virtual = Math.round(fromSvgX(x));
-      let real = Math.round(fromSvgY(y));
+      const real = Math.round(fromSvgY(y));
       const points = [...curve.points];
       if (this.drag.index === "end100") {
-        virtual = 100;
         const end = points.find((p) => p.virtual === 100);
         if (end) end.real = real;
         else points.push({ virtual: 100, real });
@@ -894,40 +1067,144 @@
     }
 
     onPointerUp() {
+      if (this.drag?.kind === "scrub" || this.drag?.kind === "scrub-plot") {
+        // Flush pending live apply immediately on release.
+        if (this._liveTimer) {
+          clearTimeout(this._liveTimer);
+          this._liveTimer = null;
+        }
+        if (this._livePending != null) {
+          const pct = this._livePending;
+          this._livePending = null;
+          this.applyRoomBrightness(pct, { silent: true });
+        }
+      }
       this.drag = null;
       this.els.svg
         .querySelectorAll(".al-point.dragging")
         .forEach((n) => n.classList.remove("dragging"));
     }
 
+    onKeyDown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (this.state.dirty) this.save();
+        return;
+      }
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        this.deleteSelectedPoint();
+      }
+      const curve = this.selectedCurve();
+      if (
+        curve?.binary &&
+        (e.key === "ArrowLeft" || e.key === "ArrowRight")
+      ) {
+        e.preventDefault();
+        const delta = e.key === "ArrowLeft" ? -1 : 1;
+        curve.threshold = clamp(curve.threshold + delta, 1, 100);
+        curve.points = [{ virtual: curve.threshold, real: 100 }];
+        this.markDirty();
+        this.render();
+      }
+    }
+
+    onContextMenu(evt) {
+      const target = evt.target;
+      if (!target.classList?.contains("al-point") || target.dataset.virtual == null) {
+        return;
+      }
+      evt.preventDefault();
+      this.state.selectedPointVirtual = Number(target.dataset.virtual);
+      this.renderPlot();
+      this.showMenu(evt.clientX, evt.clientY, [
+        {
+          label: "Delete point",
+          danger: true,
+          action: () => this.deleteSelectedPoint(),
+        },
+      ]);
+    }
+
+    showMenu(x, y, items) {
+      this.hideMenu();
+      const menu = document.createElement("div");
+      menu.className = "al-menu";
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+      items.forEach((item) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = item.label;
+        if (item.danger) btn.classList.add("danger");
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.hideMenu();
+          item.action();
+        });
+        menu.appendChild(btn);
+      });
+      this.els.menuHost.appendChild(menu);
+    }
+
+    hideMenu() {
+      this.els.menuHost.innerHTML = "";
+    }
+
     deleteSelectedPoint() {
       const curve = this.selectedCurve();
-      if (!curve || curve.binary || !this.state.selected) return;
-      let removeVirtual = this.state.selectedPointVirtual;
-      if (removeVirtual == null || removeVirtual <= 0 || removeVirtual >= 100) {
-        // Fall back to point nearest the scrub line (legacy Delete behaviour).
-        const points = curve.points.filter(
-          (p) => p.virtual > 0 && p.virtual < 100
-        );
-        if (!points.length) return;
-        let best = 0;
-        let bestDist = Infinity;
-        points.forEach((p, i) => {
-          const d = Math.abs(p.virtual - this.state.scrub);
-          if (d < bestDist) {
-            bestDist = d;
-            best = i;
-          }
-        });
-        if (bestDist > 8) return;
-        removeVirtual = points[best].virtual;
+      if (!curve || curve.binary) return;
+      const v = this.state.selectedPointVirtual;
+      if (v == null || v <= 0 || v >= 100) {
+        this.setStatus("Select an editable point first (not 0% / 100%).", "");
+        return;
       }
-      curve.points = preparePoints(
-        curve.points.filter((p) => p.virtual !== removeVirtual)
-      );
+      const before = preparePoints(curve.points);
+      const removed = before.find((p) => p.virtual === v);
+      if (!removed) return;
+      curve.points = preparePoints(before.filter((p) => p.virtual !== v));
       this.state.selectedPointVirtual = null;
+      this.state.undo = {
+        seriesId: this.state.selectedSeries,
+        points: before,
+        message: `Deleted point at ${v}%`,
+      };
       this.markDirty();
       this.render();
+      this.showUndoToast(this.state.undo.message);
+    }
+
+    showUndoToast(message) {
+      if (this._toastTimer) clearTimeout(this._toastTimer);
+      this.els.toastHost.innerHTML = `
+        <div class="al-toast" role="status">
+          <span>${escapeHtml(message)}</span>
+          <button type="button" data-el="undo">Undo</button>
+        </div>`;
+      this.els.toastHost.querySelector("[data-el='undo']").addEventListener("click", () => {
+        this.undoDelete();
+      });
+      this._toastTimer = setTimeout(() => {
+        this.els.toastHost.innerHTML = "";
+        this.state.undo = null;
+      }, 6000);
+    }
+
+    undoDelete() {
+      if (!this.state.undo) return;
+      const { seriesId, points } = this.state.undo;
+      this.state.selectedSeries = seriesId;
+      const curve = this.selectedCurve();
+      if (curve && !curve.binary) {
+        curve.points = preparePoints(points);
+        this.markDirty();
+        this.render();
+        this.setStatus("Delete undone.", "ok");
+      }
+      this.state.undo = null;
+      this.els.toastHost.innerHTML = "";
     }
   }
 

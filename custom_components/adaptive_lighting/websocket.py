@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -19,10 +20,18 @@ from .brightness_curves import (
     normalize_curve_config,
     threshold_from_config,
 )
-from .const import CONF_BRIGHTNESS_CURVES, CONF_LIGHTS, CONF_NAME, DOMAIN
+from .const import (
+    CONF_BRIGHTNESS_CURVES,
+    CONF_CURVE_GROUPS,
+    CONF_LIGHTS,
+    CONF_NAME,
+    DOMAIN,
+)
 from .light_util import is_binary_light
 
 _LOGGER = logging.getLogger(__name__)
+
+_GROUP_ID_RE = re.compile(r"^cg_[a-zA-Z0-9_-]+$")
 
 
 @callback
@@ -69,14 +78,34 @@ def _room_entity_id(entry: ConfigEntry) -> str:
     return f"light.{slug}_room"
 
 
+def _is_ha_light_group(hass: HomeAssistant, entity_id: str) -> bool:
+    """True if this light entity is a Home Assistant light group.
+
+    Light groups expose an ``entity_id`` attribute listing members (and are not
+    Hue bridge groups flagged ``is_hue_group``). Old ``group.*`` domain helpers
+    are not light entities and cannot appear in AL's light selector.
+    """
+    state = hass.states.get(entity_id)
+    if state is None:
+        return False
+    members = state.attributes.get("entity_id")
+    if not isinstance(members, (list, tuple)) or not members:
+        return False
+    if state.attributes.get("is_hue_group", False):
+        return False
+    return True
+
+
 def _light_state_payload(hass: HomeAssistant, entity_id: str) -> dict[str, Any]:
     state = hass.states.get(entity_id)
+    ha_group = _is_ha_light_group(hass, entity_id)
     if state is None:
         return {
             "state": STATE_UNAVAILABLE,
             "brightness": None,
             "brightness_pct": None,
             "binary": is_binary_light(hass, entity_id),
+            "is_ha_light_group": ha_group,
         }
     brightness = state.attributes.get(ATTR_BRIGHTNESS)
     brightness_pct = None
@@ -89,6 +118,10 @@ def _light_state_payload(hass: HomeAssistant, entity_id: str) -> dict[str, Any]:
         "brightness": brightness,
         "brightness_pct": brightness_pct,
         "binary": is_binary_light(hass, entity_id),
+        "is_ha_light_group": ha_group,
+        "group_members": list(state.attributes.get("entity_id") or [])
+        if ha_group
+        else [],
     }
 
 
@@ -124,7 +157,6 @@ def _room_state_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, An
 def _available_lights(hass: HomeAssistant, current: list[str]) -> list[dict[str, str]]:
     """Return other light entities that can be added to this instance."""
     current_set = set(current)
-    # Lights already claimed by another AL instance.
     claimed: set[str] = set()
     for entry in hass.config_entries.async_entries(DOMAIN):
         claimed.update(_lights_for_entry(entry))
@@ -144,14 +176,100 @@ def _available_lights(hass: HomeAssistant, current: list[str]) -> list[dict[str,
         reg = registry.async_get(entity_id)
         if reg and reg.disabled:
             continue
-        name = (
-            (reg.name if reg and reg.name else None)
-            or state.name
-            or entity_id
+        name = (reg.name if reg and reg.name else None) or state.name or entity_id
+        available.append(
+            {
+                "entity_id": entity_id,
+                "name": name,
+                "is_ha_light_group": _is_ha_light_group(hass, entity_id),
+            }
         )
-        available.append({"entity_id": entity_id, "name": name})
     available.sort(key=lambda item: item["name"].lower())
     return available
+
+
+def _normalize_curve_groups(
+    raw: Any,
+    lights: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Clean Curves-UI group metadata; drop unknown members / empty groups."""
+    if not isinstance(raw, dict):
+        return {}
+    used: set[str] = set()
+    cleaned: dict[str, dict[str, Any]] = {}
+    for group_id, payload in raw.items():
+        if not isinstance(group_id, str) or not _GROUP_ID_RE.match(group_id):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        members_in = payload.get("members") or []
+        if not isinstance(members_in, list):
+            continue
+        members: list[str] = []
+        for eid in members_in:
+            if not isinstance(eid, str) or eid not in lights or eid in used:
+                continue
+            members.append(eid)
+            used.add(eid)
+        if len(members) < 2:
+            continue
+        name = payload.get("name") or f"Group ({len(members)})"
+        cleaned[group_id] = {
+            "name": str(name)[:64],
+            "members": members,
+        }
+    return cleaned
+
+
+def _clean_curve_payload(
+    entity_id: str,
+    payload: dict[str, Any],
+    binary_lights: set[str],
+) -> dict[str, int] | None:
+    if entity_id in binary_lights or payload.get("binary"):
+        if "threshold" in payload:
+            threshold = int(payload["threshold"])
+        elif "points" in payload and payload["points"]:
+            threshold = threshold_from_config(
+                {
+                    str(int(p["virtual"])): int(p.get("real", 100))
+                    for p in payload["points"]
+                    if int(p.get("virtual", 0)) >= 1
+                }
+            )
+        else:
+            threshold = threshold_from_config(payload)
+        return binary_config_from_threshold(threshold)
+    if "points" in payload:
+        points = {
+            str(int(p["virtual"])): int(p["real"])
+            for p in payload["points"]
+            if int(p.get("virtual", 0)) >= 1
+        }
+    else:
+        points = payload
+    return normalize_curve_config(points)  # type: ignore[arg-type]
+
+
+def _sync_group_curves(
+    cleaned: dict[str, dict[str, int]],
+    groups: dict[str, dict[str, Any]],
+    binary_lights: set[str],
+) -> None:
+    """Copy each group's primary curve onto every member entity_id."""
+    for group in groups.values():
+        members = list(group.get("members") or [])
+        if len(members) < 2:
+            continue
+        primary = members[0]
+        source = cleaned.get(primary)
+        if source is None:
+            continue
+        for eid in members[1:]:
+            # Binary and dimmable must not mix in one shared curve.
+            if (eid in binary_lights) != (primary in binary_lights):
+                continue
+            cleaned[eid] = dict(source)
 
 
 def _curves_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
@@ -163,6 +281,10 @@ def _curves_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
         binary_lights=binary_lights,
     )
     light_states = {eid: _light_state_payload(hass, eid) for eid in lights}
+    curve_groups = _normalize_curve_groups(
+        data.get(CONF_CURVE_GROUPS, {}),
+        set(lights),
+    )
     return {
         "entry_id": entry.entry_id,
         "title": entry.title or entry.data.get(CONF_NAME, entry.entry_id),
@@ -170,9 +292,19 @@ def _curves_payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
         "names": _friendly_names(hass, lights),
         "binary_lights": sorted(binary_lights),
         "curves": curves.export_for_ui(lights),
+        "curve_groups": curve_groups,
         "room": _room_state_payload(hass, entry),
         "light_states": light_states,
         "available_lights": _available_lights(hass, lights),
+        "ha_group_note": (
+            "Home Assistant light-domain groups (helpers that create light.* with "
+            "entity_id members) can be selected as a single light in Adaptive "
+            "Lighting; Curves then shows that one entity. With expand_light_groups "
+            "enabled (default), AL expands them to members at runtime. Old group.* "
+            "domain helpers are not light entities and do not appear in the picker. "
+            "Curves UI groups are separate: they share one curve/line without "
+            "creating a HASS group."
+        ),
     }
 
 
@@ -230,6 +362,7 @@ def ws_get_curves(
         vol.Required("type"): "adaptive_lighting/save_curves",
         vol.Required("entry_id"): str,
         vol.Required("curves"): dict,
+        vol.Optional("curve_groups"): dict,
     }
 )
 @callback
@@ -238,7 +371,7 @@ def ws_save_curves(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Persist brightness curves into config entry options."""
+    """Persist brightness curves (and optional Curves-UI groups) into options."""
     entry = _entry(hass, msg["entry_id"])
     if entry is None:
         connection.send_error(msg["id"], "not_found", "Config entry not found")
@@ -249,39 +382,28 @@ def ws_save_curves(
     raw_curves: dict[str, Any] = msg["curves"]
     cleaned: dict[str, dict[str, int]] = {}
     for entity_id, payload in raw_curves.items():
-        if entity_id not in lights:
+        if entity_id not in lights or not isinstance(payload, dict):
             continue
-        if not isinstance(payload, dict):
-            continue
-        if entity_id in binary_lights or payload.get("binary"):
-            if "threshold" in payload:
-                threshold = int(payload["threshold"])
-            elif "points" in payload and payload["points"]:
-                threshold = threshold_from_config(
-                    {
-                        str(int(p["virtual"])): int(p.get("real", 100))
-                        for p in payload["points"]
-                        if int(p.get("virtual", 0)) >= 1
-                    }
-                )
-            else:
-                threshold = threshold_from_config(payload)
-            cleaned[entity_id] = binary_config_from_threshold(threshold)
-            continue
-        if "points" in payload:
-            points = {
-                str(int(p["virtual"])): int(p["real"])
-                for p in payload["points"]
-                if int(p.get("virtual", 0)) >= 1
-            }
-        else:
-            points = payload
-        cleaned[entity_id] = normalize_curve_config(points)  # type: ignore[arg-type]
+        result = _clean_curve_payload(entity_id, payload, binary_lights)
+        if result is not None:
+            cleaned[entity_id] = result
 
-    new_options = {**entry.options, CONF_BRIGHTNESS_CURVES: cleaned}
+    if "curve_groups" in msg:
+        groups = _normalize_curve_groups(msg["curve_groups"], lights)
+    else:
+        groups = _normalize_curve_groups(
+            entry.options.get(CONF_CURVE_GROUPS, {}),
+            lights,
+        )
+    _sync_group_curves(cleaned, groups, binary_lights)
+
+    new_options = {
+        **entry.options,
+        CONF_BRIGHTNESS_CURVES: cleaned,
+        CONF_CURVE_GROUPS: groups,
+    }
     hass.config_entries.async_update_entry(entry, options=new_options)
 
-    # Hot-update the running switch if present.
     switch = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("switch")
     if switch is not None and hasattr(switch, "brightness_curves"):
         switch.brightness_curves = BrightnessCurveSet.from_options(
@@ -289,7 +411,10 @@ def ws_save_curves(
             binary_lights=binary_lights,
         )
 
-    connection.send_result(msg["id"], {"ok": True, "curves": cleaned})
+    connection.send_result(
+        msg["id"],
+        {"ok": True, "curves": cleaned, "curve_groups": groups},
+    )
 
 
 @websocket_api.require_admin
@@ -362,32 +487,29 @@ def ws_update_lights(
         connection.send_error(msg["id"], "not_found", "Config entry not found")
         return
 
-    # Validate entity ids exist and are lights; keep order, drop duplicates.
     seen: set[str] = set()
     cleaned: list[str] = []
     for entity_id in msg["lights"]:
         if not isinstance(entity_id, str) or not entity_id.startswith("light."):
             continue
-        if entity_id in seen:
+        if entity_id in seen or entity_id.endswith("_room"):
             continue
-        if entity_id.endswith("_room"):
-            continue
-        state = hass.states.get(entity_id)
-        if state is None:
+        if hass.states.get(entity_id) is None:
             continue
         seen.add(entity_id)
         cleaned.append(entity_id)
 
     curves = dict(entry.options.get(CONF_BRIGHTNESS_CURVES, {}))
     curves = {eid: cfg for eid, cfg in curves.items() if eid in seen}
+    groups = _normalize_curve_groups(entry.options.get(CONF_CURVE_GROUPS, {}), seen)
     new_options = {
         **entry.options,
         CONF_LIGHTS: cleaned,
         CONF_BRIGHTNESS_CURVES: curves,
+        CONF_CURVE_GROUPS: groups,
     }
     hass.config_entries.async_update_entry(entry, options=new_options)
 
-    # Hot-update configured lights on the running switch before reload lands.
     switch = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("switch")
     if switch is not None:
         switch._configured_lights = list(cleaned)  # noqa: SLF001
