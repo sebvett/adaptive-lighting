@@ -124,13 +124,33 @@ class AdaptiveLightingRoomLight(LightEntity):
 
     @callback
     def _async_member_changed(self, _event) -> None:
+        # While we are still issuing member commands, ignore intermediate
+        # updates; after apply finishes we refresh once, and later HA state
+        # changes (delayed device feedback) flow through here normally.
         if self._applying:
             return
         self._refresh_from_members()
         self.async_write_ha_state()
 
-    def _refresh_from_members(self) -> None:
-        """Infer room on/brightness from controlled lights (Lightener-style)."""
+    def _refresh_from_members(
+        self,
+        *,
+        prefer: int | None = None,
+        previous: int | None = None,
+    ) -> None:
+        """Infer room on/brightness from controlled lights (Lightener-style).
+
+        Room brightness mirrors underlying member feedback — the same signal
+        you get when a single light snaps back after a failed ``turn_on``:
+
+        * Prefer a room level consistent with **all** members' reverse-mapped
+          brightness (curve ``translate_back``).
+        * If ``prefer`` (the last commanded room level) is in that set, use it.
+        * Else if ``previous`` (pre-command room level) is in that set, keep it —
+          members never reached the target (no response / snap-back).
+        * If members disagree (partial response), use the average of each
+          light's preferred reverse-mapped room level.
+        """
         lights = self._lights
         if not lights:
             # Keep last commanded room level when no members are configured yet.
@@ -139,6 +159,7 @@ class AdaptiveLightingRoomLight(LightEntity):
         curves = self._curves
         any_on = False
         level_sets: list[set[int]] = []
+        preferred_levels: list[int] = []
         for entity_id in lights:
             state = self.hass.states.get(entity_id)
             if state is None or state.state == STATE_UNAVAILABLE:
@@ -148,7 +169,10 @@ class AdaptiveLightingRoomLight(LightEntity):
                 brightness = state.attributes.get(ATTR_BRIGHTNESS, 255) or 0
             else:
                 brightness = 0
-            level_sets.append(set(curves.get(entity_id).translate_back(brightness)))
+            levels = set(curves.get(entity_id).translate_back(brightness))
+            level_sets.append(levels)
+            if levels:
+                preferred_levels.append(sorted(levels)[len(levels) // 2])
 
         if not level_sets:
             return
@@ -161,11 +185,24 @@ class AdaptiveLightingRoomLight(LightEntity):
         common: set[int] | None = None
         for levels in level_sets:
             common = levels if common is None else common & levels
+
         if common:
-            # Prefer keeping the current room level when it still matches.
-            if self._attr_brightness in common:
-                return
-            self._attr_brightness = sorted(common)[len(common) // 2]
+            if prefer is not None and prefer in common:
+                self._attr_brightness = prefer
+            elif previous is not None and previous in common:
+                # Members still consistent with the pre-command room level.
+                self._attr_brightness = previous
+            elif prefer is not None:
+                self._attr_brightness = min(
+                    common, key=lambda value: abs(value - prefer)
+                )
+            else:
+                self._attr_brightness = sorted(common)[len(common) // 2]
+        elif preferred_levels:
+            # Partial / inconsistent members — average reverse-mapped room %.
+            self._attr_brightness = max(
+                0, min(255, round(sum(preferred_levels) / len(preferred_levels)))
+            )
         elif self._attr_brightness is None:
             self._attr_brightness = 128
 
@@ -243,16 +280,35 @@ class AdaptiveLightingRoomLight(LightEntity):
         context=None,
         only_lights: list[str] | None = None,
     ) -> None:
-        """Apply room brightness to member lights via Lightener curves."""
+        """Apply room brightness to member lights via Lightener curves.
+
+        The commanded room level is used only to translate member targets.
+        Reported room brightness is derived afterwards from members' HA state
+        (reverse-mapped through curves), so unresponsive lights do not leave
+        the room stuck at the target — same feedback model as a single light.
+        """
+        if brightness is not None:
+            commanded = max(0, min(255, int(brightness)))
+        else:
+            commanded = self._attr_brightness or 0
+        want_on = commanded > 0
+        # Capture pre-command level before holding the in-flight command so
+        # ``_refresh_from_members`` can restore it when members never move.
+        previous_brightness = self._attr_brightness
+
         self._applying = True
         try:
+            # Hold the commanded level in-memory so concurrent AL adaptation
+            # (e.g. ``_virtual_room_brightness``) sees the in-flight room
+            # command. HA state is not published until members report — see
+            # finally → ``_refresh_from_members``.
             if brightness is not None:
-                self._attr_brightness = max(0, min(255, int(brightness)))
-                self._attr_is_on = self._attr_brightness > 0
+                self._attr_brightness = commanded
+                self._attr_is_on = want_on
 
             curves = self._curves  # honors _preview_curves when set by Curves editor
             targets = only_lights if only_lights is not None else self._lights
-            room = self._attr_brightness or 0
+            room = commanded
 
             # Mark member calls as Adaptive Lighting's own so the turn_on
             # interceptor does not re-adapt them with sun brightness and wipe
@@ -275,7 +331,7 @@ class AdaptiveLightingRoomLight(LightEntity):
 
                 binary = is_binary_light(self.hass, entity_id)
 
-                if entity_brightness <= 0 or not self._attr_is_on:
+                if entity_brightness <= 0 or not want_on:
                     try:
                         await self.hass.services.async_call(
                             "light",
@@ -332,6 +388,11 @@ class AdaptiveLightingRoomLight(LightEntity):
                     )
         finally:
             self._applying = False
+            # Publish room state from member feedback, not the commanded target.
+            self._refresh_from_members(
+                prefer=commanded if brightness is not None else None,
+                previous=previous_brightness,
+            )
             self.async_write_ha_state()
 
     def _member_call_context(self, parent=None):
@@ -438,9 +499,12 @@ class AdaptiveLightingRoomLight(LightEntity):
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off all member lights."""
+        """Turn off all member lights.
+
+        Room off/brightness follows member feedback after commands land
+        (see ``async_apply_room_brightness``), not an optimistic local clear.
+        """
         transition = kwargs.get(ATTR_TRANSITION)
-        self._attr_is_on = False
         await self.async_apply_room_brightness(
             0,
             transition=transition,

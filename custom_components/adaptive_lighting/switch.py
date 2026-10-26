@@ -2962,6 +2962,18 @@ class AdaptiveLightingManager:
                 # Note: the reset below already happened in `_service_interceptor_turn_on_handler`
                 return
 
+            # Virtual room light already applied curve-mapped levels; re-adapting
+            # here can fight the room command (e.g. turn a binary plug back off
+            # when reverse-mapped room brightness briefly disagrees).
+            if is_our_context(event.context, "room"):
+                _LOGGER.debug(
+                    "Skipping responding to 'off' → 'on' event for '%s' with context.id='%s' because"
+                    " it was triggered by the virtual room light",
+                    entity_id,
+                    event.context.id,
+                )
+                return
+
             self.reset(entity_id, reset_manual_control=False)
             lock = self.turn_off_locks.setdefault(entity_id, asyncio.Lock())
             async with lock:
@@ -3134,10 +3146,11 @@ class AdaptiveLightingManager:
         entity_id: str,
         off_to_on_event: Event[EventStateChangedData],
     ) -> bool:
-        # Adaptive Lighting should never turn on lights itself
-        if is_our_context(off_to_on_event.context) and not is_our_context(
-            off_to_on_event.context,
-            "service",  # adaptive_lighting.apply is allowed to turn on lights
+        # Adaptive Lighting should never turn on lights itself, except via
+        # adaptive_lighting.apply ("service") or the virtual room light ("room").
+        if is_our_context(off_to_on_event.context) and not (
+            is_our_context(off_to_on_event.context, "service")
+            or is_our_context(off_to_on_event.context, "room")
         ):
             _LOGGER.warning(
                 "Detected an 'off' → 'on' event for '%s' with context.id='%s',"
